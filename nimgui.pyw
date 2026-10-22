@@ -36,7 +36,11 @@ import nimbus
 # ---------------------------------------------------------------------------
 
 try:
-    _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False):
+        _SCRIPT_DIR = os.path.dirname(sys.executable)
+    else:
+        _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
     if _SCRIPT_DIR and os.path.isdir(_SCRIPT_DIR):
         os.chdir(_SCRIPT_DIR)
 except Exception as e:
@@ -347,20 +351,28 @@ def t(key: str, **kw) -> str:
 def build_launch_command(include_minimized: bool = True) -> str:
     if getattr(sys, "frozen", False):
         exe = sys.executable
-        args = [exe]
+        script = None
     else:
-        script = os.path.abspath(sys.argv[0])
+        script = os.path.abspath(__file__)
         if platform.system() == "Windows":
-            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-            exe = pythonw if os.path.exists(pythonw) else sys.executable
+            if sys.executable.lower().endswith("python.exe"):
+                pythonw = sys.executable[:-10] + "pythonw.exe"
+                exe = pythonw if os.path.exists(pythonw) else sys.executable
+            elif sys.executable.lower().endswith("pythonw.exe"):
+                exe = sys.executable
+            else:
+                pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+                exe = pythonw if os.path.exists(pythonw) else sys.executable
         else:
             exe = sys.executable
-        args = [exe, script]
 
+    parts = [f'"{exe}"']
+    if script:
+        parts.append(f'"{script}"')
     if include_minimized and settings.get("start_minimized", False):
-        args.append("--minimized")
+        parts.append("--minimized")
 
-    return " ".join(f'"{a}"' for a in args)
+    return " ".join(parts)
 
 
 def is_autostart_enabled() -> bool:
@@ -390,16 +402,20 @@ def set_autostart(enabled: bool) -> bool:
     if platform.system() == "Windows":
         try:
             import winreg
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Run",
-                0, winreg.KEY_ALL_ACCESS,
-            )
-            if enabled:
-                winreg.SetValueEx(
-                    key, "Nimbus", 0, winreg.REG_SZ,
-                    build_launch_command(include_minimized=True),
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
                 )
+            except FileNotFoundError:
+                key = winreg.CreateKeyEx(
+                    winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
+                )
+
+            if enabled:
+                cmd = build_launch_command(include_minimized=True)
+                winreg.SetValueEx(key, "Nimbus", 0, winreg.REG_SZ, cmd)
             else:
                 try:
                     winreg.DeleteValue(key, "Nimbus")
@@ -408,7 +424,8 @@ def set_autostart(enabled: bool) -> bool:
             winreg.CloseKey(key)
             return True
         except Exception as e:
-            print(f"[autostart] error: {e}")
+            with open("autostart_error.log", "a", encoding="utf-8") as f:
+                f.write(f"Error: {e}\n")
             return False
 
     if platform.system() == "Linux":
@@ -452,7 +469,11 @@ def detect_system_theme() -> str:
 
 
 def get_icon_path() -> str:
-    base = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+
     for p in [
         os.path.join(base, "assets", "icon.ico"),
         os.path.join(base, "assets", "icon.png"),
@@ -3276,4 +3297,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+
+        with open("nimbus_crash.log", "w", encoding="utf-8") as f:
+            traceback.print_exc(file=f)
+        try:
+            QMessageBox.critical(None, "Nimbus Error", "Программа упала. Детали в nimbus_crash.log")
+        except Exception:
+            pass
