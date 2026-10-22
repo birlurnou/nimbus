@@ -77,10 +77,10 @@ def acquire_single_instance_lock() -> bool:
 LAST_USER_FILE = ".nimbus_last_user"
 
 DEFAULT_SETTINGS = {
-    "language": "ru",
+    "language": "en",
     "theme": "system",
-    "autostart": False,
-    "start_minimized": False,
+    "autostart": True,
+    "start_minimized": True,
     "password_length": 18,
     "clipboard_timeout": 30,
     "session_timeout": 300,
