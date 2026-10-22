@@ -3,13 +3,16 @@ name: Build Nimbus (Windows)
 on:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]          # ← добавили триггер по тегам
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:   # позволяет запускать вручную из вкладки Actions
+  workflow_dispatch:
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: write        # ← нужно для создания релиза
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,9 +37,27 @@ jobs:
             --collect-all cryptography `
             nimgui.pyw
 
-      - name: Upload Windows artifact
+      # Упаковываем папку dist/Nimbus в один zip — удобнее скачивать
+      - name: Zip build
+        run: Compress-Archive -Path dist\Nimbus\* -DestinationPath Nimbus-Windows.zip
+        shell: pwsh
+
+      # Артефакт для истории Actions (остаётся на 30 дней)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Nimbus-Windows
-          path: dist/Nimbus/
+          path: Nimbus-Windows.zip
           retention-days: 30
+
+      # Если это тег v* — создаём/обновляем GitHub Release
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Nimbus-Windows.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
