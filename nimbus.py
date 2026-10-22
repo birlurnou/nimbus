@@ -6,12 +6,14 @@ import os
 import platform
 import secrets
 import shlex
+import shutil
 import string
 import sys
 import tempfile
 import threading
 import time
 from typing import Optional
+import zipfile
 
 try:
     from cryptography.fernet import Fernet, InvalidToken
@@ -29,19 +31,157 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Constants
+# Legacy constants (CLI)
 # ---------------------------------------------------------------------------
 
 KEY_FILE = '.nimbus_key'
 SALT_FILE = '.nimbus_salt'
 DATA_FILE = '.nimbus'
-AUDIT_FILE = '.nimbus_audit.log'
+META_FILE = '.nimbus_meta'
 
-KDF_ITERATIONS = 391827
+KDF_ITERATIONS_V1 = 391_827
+KDF_ITERATIONS_V2 = 600_000
+KDF_ITERATIONS = KDF_ITERATIONS_V2
+
+STORAGE_VERSION = 2
+META_VERSION = 2
+
+MIN_MASTER_PASSWORD_LEN = 10          # ← было 12, теперь 10
 SESSION_TIMEOUT = 300
 MAX_LOGIN_ATTEMPTS = 3
 CLIPBOARD_CLEAR_SECONDS = 30
-STORAGE_VERSION = 2
+
+
+# ---------------------------------------------------------------------------
+# Multi-user paths
+# ---------------------------------------------------------------------------
+
+class UserPaths:
+    def __init__(self, username: str, base_dir: str = '.'):
+        self.username = username
+        self.base_dir = base_dir
+        self.user_dir = os.path.join(base_dir, username)
+        self.data_file = os.path.join(self.user_dir, f'{username}.nimbus')
+        self.key_file = os.path.join(self.user_dir, f'{username}.nimbus_key')
+        self.salt_file = os.path.join(self.user_dir, f'{username}.nimbus_salt')
+        self.meta_file = os.path.join(self.user_dir, f'{username}.nimbus_meta')
+        self.settings_file = os.path.join(self.user_dir, f'{username}.nimbus_settings')
+        self.lock_file = os.path.join(self.user_dir, f'{username}.nimbus.lock')
+
+    def ensure_dir(self):
+        os.makedirs(self.user_dir, exist_ok=True)
+        if not os.path.exists(self.lock_file):
+            try:
+                _atomic_write_text(
+                    self.lock_file,
+                    f"created={time.ctime()}\n",
+                )
+            except Exception:
+                pass
+
+    def exists(self) -> bool:
+        return os.path.exists(self.key_file)
+
+    def all_files(self) -> list:
+        return [
+            self.data_file,
+            self.key_file,
+            self.salt_file,
+            self.meta_file,
+            self.settings_file,
+            self.lock_file,
+        ]
+
+    def export_to_zip(self, dest_dir: str) -> tuple[bool, str]:
+        """
+        Упаковывает все файлы пользователя в ZIP-архив: {dest_dir}/{username}.zip
+        Внутри архива создаётся папка {username}/ с файлами.
+        Обрабатывает заблокированный .lock файл (создаёт заглушку).
+        Использует временный файл для атомарной записи.
+        """
+        zip_filename = f"{self.username}.zip"
+        full_zip_path = os.path.join(dest_dir, zip_filename)
+
+        try:
+            # Создаём временный файл в той же папке для атомарности
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                prefix='.nimbus_zip_', dir=dest_dir, suffix='.zip'
+            )
+            os.close(tmp_fd)  # zipfile откроет его сам
+
+            with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                added = 0
+                skipped = []
+
+                for src in self.all_files():
+                    if not os.path.exists(src):
+                        skipped.append(os.path.basename(src))
+                        continue
+
+                    arcname = f"{self.username}/{os.path.basename(src)}"
+                    try:
+                        zf.write(src, arcname)
+                        added += 1
+                    except PermissionError:
+                        # Заблокированный .lock — пишем заглушку
+                        if src.endswith('.lock'):
+                            try:
+                                zf.writestr(arcname, "exported (original locked)\n")
+                                added += 1
+                            except Exception:
+                                skipped.append(os.path.basename(src))
+                        else:
+                            skipped.append(os.path.basename(src))
+                    except Exception:
+                        skipped.append(os.path.basename(src))
+
+            # Атомарная замена
+            os.replace(tmp_path, full_zip_path)
+            try:
+                os.chmod(full_zip_path, 0o600)
+            except Exception:
+                pass
+
+            msg = f'Exported {added} files to {full_zip_path}'
+            if skipped:
+                msg += f'\nSkipped: {", ".join(skipped)}'
+            return True, msg
+
+        except Exception as e:
+            # Убираем временный файл при ошибке
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            return False, f'Archive export failed: {e}'
+
+
+def list_existing_users(base_dir: str = '.') -> list:
+    users = []
+    try:
+        for name in os.listdir(base_dir):
+            path = os.path.join(base_dir, name)
+            if not os.path.isdir(path):
+                continue
+            if os.path.exists(os.path.join(path, f'{name}.nimbus_key')):
+                users.append(name)
+    except Exception:
+        pass
+    return sorted(users)
+
+
+def validate_username(username: str) -> Optional[str]:
+    if not username:
+        return 'empty'
+    if len(username) < 2:
+        return 'too_short'
+    if len(username) > 32:
+        return 'too_long'
+    bad = set('/\\:*?"<>|\0\t\n\r .')
+    if any(c in bad for c in username):
+        return 'bad_chars'
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -61,13 +201,28 @@ def safe_str(value) -> str:
     return str(value).replace('\r', ' ').replace('\n', ' ').strip()
 
 
-def audit(action: str, detail: str = '') -> None:
+def _atomic_write_bytes(path: str, data: bytes, mode: int = 0o600) -> None:
+    parent = os.path.dirname(path) or '.'
+    os.makedirs(parent, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix='.nimbus_tmp_', dir=parent)
     try:
-        ts = time.strftime('%Y-%m-%d %H:%M:%S')
-        with open(AUDIT_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{ts}\t{action}\t{detail}\n")
-    except Exception:
-        pass
+        with os.fdopen(tmp_fd, 'wb') as f:
+            f.write(data)
+        try:
+            os.chmod(tmp_path, mode)
+        except Exception:
+            pass
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+def _atomic_write_text(path: str, content: str, mode: int = 0o600) -> None:
+    _atomic_write_bytes(path, content.encode('utf-8'), mode=mode)
 
 
 # ---------------------------------------------------------------------------
@@ -98,13 +253,41 @@ def generate_password(length: int = 18) -> str:
 
 
 # ---------------------------------------------------------------------------
+# KDF meta
+# ---------------------------------------------------------------------------
+
+def get_kdf_iterations(meta_file: str = META_FILE) -> int:
+    if not os.path.exists(meta_file):
+        return KDF_ITERATIONS_V1
+    try:
+        with open(meta_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        it = int(data.get('iterations', KDF_ITERATIONS_V1))
+        return it if it > 0 else KDF_ITERATIONS_V1
+    except Exception as e:
+        print(f"[meta] read error: {e}; using legacy iterations")
+        return KDF_ITERATIONS_V1
+
+
+def save_meta(meta_file: str, iterations: int) -> None:
+    payload = json.dumps(
+        {"version": META_VERSION, "iterations": int(iterations)},
+        indent=2,
+    )
+    _atomic_write_text(meta_file, payload)
+
+
+# ---------------------------------------------------------------------------
 # Encryption
 # ---------------------------------------------------------------------------
 
 class EncryptionManager:
-    def __init__(self, password: str, salt: bytes, iterations: int = KDF_ITERATIONS):
+    def __init__(self, password: str, salt: bytes, iterations: Optional[int] = None):
+        if iterations is None:
+            iterations = KDF_ITERATIONS_V2
         self.salt = salt
         self.iterations = iterations
+
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
@@ -113,6 +296,7 @@ class EncryptionManager:
         )
         key = base64.urlsafe_b64encode(kdf.derive(password.encode('utf-8')))
         self.cipher = Fernet(key)
+        del key
 
     def encrypt(self, data: str) -> str:
         return base64.urlsafe_b64encode(
@@ -126,40 +310,56 @@ class EncryptionManager:
 
 
 # ---------------------------------------------------------------------------
-# Key/salt
+# Salt / key / verification
 # ---------------------------------------------------------------------------
 
-def load_or_create_salt() -> bytes:
-    if os.path.exists(SALT_FILE):
-        with open(SALT_FILE, 'rb') as f:
+def load_or_create_salt(salt_file: str = SALT_FILE) -> bytes:
+    if os.path.exists(salt_file):
+        with open(salt_file, 'rb') as f:
             salt = f.read()
         if len(salt) != 16:
             raise RuntimeError(
-                f'Corrupted {SALT_FILE}: expected 16 bytes, got {len(salt)}'
+                f'Corrupted {salt_file}: expected 16 bytes, got {len(salt)}'
             )
         return salt
     salt = secrets.token_bytes(16)
-    with open(SALT_FILE, 'wb') as f:
-        f.write(salt)
-    try:
-        os.chmod(SALT_FILE, 0o600)
-    except Exception:
-        pass
+    _atomic_write_bytes(salt_file, salt)
     return salt
 
 
-def verify_master_password(password: str, salt: bytes) -> Optional[str]:
-    if not os.path.exists(KEY_FILE):
-        return None
+def save_key_file(key_file: str, encrypted: str) -> None:
+    _atomic_write_text(key_file, encrypted)
+
+
+def verify_master_password(password: str, salt: bytes,
+                            key_file: Optional[str] = None) -> bool:
+    if key_file is None:
+        key_file = KEY_FILE
+    if not os.path.exists(key_file):
+        return False
     try:
-        with open(KEY_FILE, 'r', encoding='utf-8') as f:
+        with open(key_file, 'r', encoding='utf-8') as f:
             encrypted = f.read().strip()
-        if not encrypted:
-            return None
+    except OSError as e:
+        print(f"[verify] cannot read {key_file}: {e}")
+        return False
+
+    if not encrypted:
+        return False
+
+    try:
         crypto = EncryptionManager(password, salt)
-        return crypto.decrypt(encrypted)
-    except (InvalidToken, ValueError, Exception):
-        return None
+        decrypted = crypto.decrypt(encrypted)
+    except InvalidToken:
+        return False
+    except (ValueError, TypeError) as e:
+        print(f"[verify] corrupted {key_file}: {e}")
+        return False
+    except Exception as e:
+        print(f"[verify] unexpected error: {e}")
+        return False
+
+    return decrypted == password
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +367,8 @@ def verify_master_password(password: str, salt: bytes) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 class Storage:
-    def __init__(self, crypto: EncryptionManager):
-        self.file = DATA_FILE
+    def __init__(self, crypto: EncryptionManager, data_file: str = DATA_FILE):
+        self.file = data_file
         self.crypto = crypto
         self.data: list = self._load()
 
@@ -195,26 +395,8 @@ class Storage:
 
     def _save(self) -> None:
         payload = {'version': STORAGE_VERSION, 'records': self.data}
-        encrypted = self.crypto.encrypt(
-            json.dumps(payload, ensure_ascii=False)
-        )
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            prefix='.nimbus_tmp_', dir='.', text=True
-        )
-        try:
-            with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-                f.write(encrypted)
-            try:
-                os.chmod(tmp_path, 0o600)
-            except Exception:
-                pass
-            os.replace(tmp_path, self.file)
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+        encrypted = self.crypto.encrypt(json.dumps(payload, ensure_ascii=False))
+        _atomic_write_text(self.file, encrypted)
 
     def get_all(self) -> list:
         return self.data
@@ -226,32 +408,44 @@ class Storage:
 
     def add(self, record: dict) -> None:
         self.data.append(record)
-        self._save()
-        audit('add', record.get('service', ''))
+        try:
+            self._save()
+        except Exception:
+            self.data.pop()
+            raise
 
     def update(self, index: int, record: dict) -> bool:
-        if 0 <= index < len(self.data):
-            self.data[index] = record
+        if not (0 <= index < len(self.data)):
+            return False
+        old = self.data[index]
+        self.data[index] = record
+        try:
             self._save()
-            audit('update', record.get('service', ''))
-            return True
-        return False
+        except Exception:
+            self.data[index] = old
+            raise
+        return True
 
     def delete(self, index: int) -> bool:
-        if 0 <= index < len(self.data):
-            name = self.data[index].get('service', '')
-            del self.data[index]
+        if not (0 <= index < len(self.data)):
+            return False
+        old = self.data.pop(index)
+        try:
             self._save()
-            audit('delete', name)
-            return True
-        return False
+        except Exception:
+            self.data.insert(index, old)
+            raise
+        return True
 
     def delete_all(self) -> int:
-        count = len(self.data)
-        self.data = []
-        self._save()
-        audit('delete_all', str(count))
-        return count
+        old = list(self.data)
+        self.data.clear()
+        try:
+            self._save()
+        except Exception:
+            self.data.extend(old)
+            raise
+        return len(old)
 
     def export_to_file(self, filepath: str) -> tuple[bool, str]:
         try:
@@ -268,7 +462,7 @@ class Storage:
                 prefix='.nimbus_export_', dir=directory, text=True
             )
             try:
-                with os.fdopen(tmp_fd, 'w', encoding='utf-8', newline='') as f:
+                with os.fdopen(tmp_fd, 'w', encoding='utf-8-sig', newline='') as f:
                     writer = csv.writer(
                         f, delimiter=';', quoting=csv.QUOTE_MINIMAL,
                         lineterminator='\n'
@@ -292,7 +486,6 @@ class Storage:
                     except Exception:
                         pass
 
-            audit('export', f'{len(self.data)} records -> {full_path}')
             return True, (
                 f'Exported {len(self.data)} records to {full_path}\n'
                 f'WARNING: file is plaintext — delete it after use.'
@@ -311,7 +504,7 @@ class Storage:
             new_records = []
             errors = []
 
-            with open(full_path, 'r', encoding='utf-8', newline='') as f:
+            with open(full_path, 'r', encoding='utf-8-sig', newline='') as f:
                 reader = csv.reader(f, delimiter=';')
                 for line_num, parts in enumerate(reader, 1):
                     if not parts or all(not p.strip() for p in parts):
@@ -336,9 +529,14 @@ class Storage:
             if not new_records:
                 return False, f'No records imported. Errors: {len(errors)}'
 
+            n_before = len(self.data)
             self.data.extend(new_records)
-            self._save()
-            audit('import', f'{len(new_records)} records')
+            try:
+                self._save()
+            except Exception as e:
+                del self.data[n_before:]
+                return False, f'Import failed (save): {e}'
+
             return True, (
                 f'Imported {len(new_records)} records. '
                 f'Errors: {len(errors)}'
@@ -354,9 +552,11 @@ class Storage:
 class Session:
     def __init__(self):
         self.auth = False
-        self.master_password: Optional[str] = None
+        self.crypto: Optional[EncryptionManager] = None
         self.storage: Optional[Storage] = None
         self.salt: Optional[bytes] = None
+        self.paths: Optional[UserPaths] = None
+        self.username: Optional[str] = None
         self.last_action = time.time()
         self.expired = False
 
@@ -365,8 +565,10 @@ class Session:
 
     def logout(self):
         self.auth = False
-        self.master_password = None
+        self.crypto = None
         self.storage = None
+        self.paths = None
+        self.username = None
         self.expired = False
 
     def is_idle(self) -> bool:
@@ -384,39 +586,41 @@ def inactivity_monitor(session: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Authentication
+# CLI Authentication (legacy)
 # ---------------------------------------------------------------------------
 
 def create_master_password(salt: bytes) -> Optional[str]:
     print('You need to create a master password.\n')
+    print(f'Minimum {MIN_MASTER_PASSWORD_LEN} characters.\n')
     while True:
-        password = getpass.getpass('Enter master password (min 4 chars): ')
-        if len(password) < 4:
-            print('Too short. Try again.\n')
+        password = getpass.getpass(
+            f'Enter master password (min {MIN_MASTER_PASSWORD_LEN} chars): '
+        )
+        if len(password) < MIN_MASTER_PASSWORD_LEN:
+            print(f'Too short (min {MIN_MASTER_PASSWORD_LEN}). Try again.\n')
             continue
         confirm = getpass.getpass('Confirm master password: ')
         if password != confirm:
             print('Passwords do not match. Try again.\n')
             continue
 
-        crypto = EncryptionManager(password, salt)
-        encrypted = crypto.encrypt(password)
-        with open(KEY_FILE, 'w', encoding='utf-8') as f:
-            f.write(encrypted)
         try:
-            os.chmod(KEY_FILE, 0o600)
-        except Exception:
-            pass
+            save_meta(META_FILE, KDF_ITERATIONS_V2)
+            crypto = EncryptionManager(password, salt, iterations=KDF_ITERATIONS_V2)
+            encrypted = crypto.encrypt(password)
+            save_key_file(KEY_FILE, encrypted)
+        except Exception as e:
+            print(f'FATAL: cannot save master key: {e}')
+            return None
 
         clear_console()
         print('Master password set successfully.')
-        audit('master_password_created')
         return password
 
 
 def auth(session: Session) -> bool:
     try:
-        session.salt = load_or_create_salt()
+        session.salt = load_or_create_salt(SALT_FILE)
     except RuntimeError as e:
         print(f'FATAL: {e}')
         sys.exit(1)
@@ -425,37 +629,37 @@ def auth(session: Session) -> bool:
         pw = create_master_password(session.salt)
         if pw is None:
             return False
-        session.master_password = pw
     else:
         if not os.path.exists(SALT_FILE):
             print('FATAL: key exists but salt missing. Restore from backup.')
             sys.exit(1)
 
+        pw = None
         for attempt in range(1, MAX_LOGIN_ATTEMPTS + 1):
             password = getpass.getpass('\nMaster password: ')
-            verified = verify_master_password(password, session.salt)
-            if verified is not None:
-                session.master_password = verified
+            if verify_master_password(password, session.salt, KEY_FILE):
+                pw = password
                 break
             print(f'Wrong password ({attempt}/{MAX_LOGIN_ATTEMPTS})')
             time.sleep(min(2 ** attempt, 8))
         else:
             print('Too many failed attempts.')
-            audit('auth_failed')
             return False
 
     try:
-        crypto = EncryptionManager(session.master_password, session.salt)
-        session.storage = Storage(crypto)
+        iterations = get_kdf_iterations(META_FILE)
+        crypto = EncryptionManager(pw, session.salt, iterations=iterations)
+        storage = Storage(crypto, DATA_FILE)
     except SystemExit:
         raise
     except Exception as e:
         print(f'FATAL: cannot initialize storage: {e}')
         return False
 
+    session.crypto = crypto
+    session.storage = storage
     session.auth = True
     session.touch()
-    audit('auth_ok')
     return True
 
 
@@ -489,7 +693,7 @@ def confirm(prompt: str = '(y/n): ') -> bool:
 
 def confirm_master_password(session: Session) -> bool:
     pw = getpass.getpass('Enter master password to confirm: ')
-    return verify_master_password(pw, session.salt) is not None
+    return verify_master_password(pw, session.salt, KEY_FILE)
 
 
 def copy_to_clipboard(text: str) -> None:
@@ -513,7 +717,7 @@ def copy_to_clipboard(text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Commands
+# CLI commands
 # ---------------------------------------------------------------------------
 
 def cmd_show(args: list[str], session: Session) -> None:
@@ -602,7 +806,9 @@ def cmd_add(args: list[str], session: Session) -> None:
 
 def _apply_update(session: Session, idx: int, new_record: dict, label: str) -> None:
     old = session.storage.get(idx)
-    assert old is not None
+    if old is None:
+        print('Record not found')
+        return
     print(f'''
 Are you sure you want to update index [{idx + 1}]?
 
@@ -775,6 +981,7 @@ Records:       {len(data)}
 File size:     {size} bytes
 Last modified: {mtime}
 Storage ver:   {STORAGE_VERSION}
+KDF iters:     {get_kdf_iterations(META_FILE)}
 Clipboard:     {'available' if HAS_CLIPBOARD else 'unavailable (pip install pyperclip)'}
 ''')
 
@@ -801,12 +1008,6 @@ Commands:
   del all                       - delete ALL records (requires 'DELETE')
 
   export <path>                 - export all records to plaintext CSV (semicolon)
-                                  file is created with 0600 permissions
-                                  examples:
-                                    export backup.txt
-                                    export ~/Desktop/backup.txt
-                                    export /var/usr/backup.txt
-                                    export D:/Users/backup.txt
 
   import <path>                 - import records from CSV (semicolon)
 
@@ -881,7 +1082,7 @@ def dispatch(raw: str, session: Session) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# CLI entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -911,7 +1112,6 @@ def main() -> None:
             break
 
         session.touch()
-
         clear_console()
 
         if dispatch(raw, session) == 'exit':
