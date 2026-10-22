@@ -9,7 +9,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.5+-41CD52?style=flat-square&logo=qt&logoColor=white)](https://pypi.org/project/PyQt6/)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square)](https://github.com/your-username/nimbus#-известные-ограничения)
+[![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
+[![Build](https://img.shields.io/badge/build-PyInstaller-yellow?style=flat-square)](#-сборка-в-exe)
 
 </div>
 
@@ -53,7 +54,7 @@
 - **Экспорт `.nimbus`** — ZIP-архив с зашифрованными файлами пользователя для бэкапа.
 
 ### Удобство
-- **Автозапуск при старте системы** (Windows registry / Linux autostart).
+- **Автозапуск при старте системы** (Windows registry).
 - **Запуск свёрнутым в трей**.
 - **Настройка длины пароля, времени блокировки, автоочистки буфера**.
 - **Локализованные диалоги подтверждения** — никаких кривых `QMessageBox`.
