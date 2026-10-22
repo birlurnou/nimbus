@@ -6,8 +6,9 @@
 
 Локальное хранение · AES-128 · PBKDF2-600k · Светлая и тёмная темы · RU/EN
 
-[![Release](https://img.shields.io/github/v/release/your-username/nimbus?style=flat-square&color=success)](https://github.com/birlurnou/nimbus/releases/latest)
-[![Build](https://img.shields.io/github/actions/workflow/status/your-username/nimbus/build.yml?style=flat-square&label=build)](https://github.com/birlurnou/nimbus/actions/workflows/build.yaml)[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Release](https://img.shields.io/github/v/release/birlurnou/nimbus?style=flat-square&color=success)](https://github.com/birlurnou/nimbus/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/birlurnou/nimbus/build.yaml?style=flat-square&label=build)](https://github.com/birlurnou/nimbus/actions/workflows/build.yaml)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![PyQt6](https://img.shields.io/badge/PyQt6-6.5+-41CD52?style=flat-square&logo=qt&logoColor=white)](https://pypi.org/project/PyQt6/)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
