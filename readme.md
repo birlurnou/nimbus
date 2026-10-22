@@ -2,9 +2,12 @@
 
 # ⚡ Nimbus
 
-**Лёгкий менеджер паролей с шифрованием, мультипользовательским режимом и стильным интерфейсом.**
+**Lightweight password manager with encryption, multi-user mode, and a sleek interface.**
 
-Локальное хранение · AES-128 · PBKDF2-600k · Светлая и тёмная темы · RU/EN
+Local storage · AES-128 · PBKDF2-600k · Light/Dark themes · RU/EN
+
+[![EN](https://img.shields.io/badge/🇺🇸_English-blue?style=flat-square)](readme.md)
+[![RU](https://img.shields.io/badge/🇷🇺_Русский-gray?style=flat-square)](readme.ru.md)
 
 [![Release](https://img.shields.io/github/v/release/birlurnou/nimbus?style=flat-square&color=success)](https://github.com/birlurnou/nimbus/releases/latest)
 [![Build](https://img.shields.io/github/actions/workflow/status/birlurnou/nimbus/build.yaml?style=flat-square&label=build)](https://github.com/birlurnou/nimbus/actions/workflows/build.yaml)
@@ -15,89 +18,89 @@
 
 </div>
 
-![Главное окно — светлая тема](docs/main-light.png)
+![Main window — light theme](docs/main-light.png)
 
 ---
 
-## ✨ Возможности
+## ✨ Features
 
-### Безопасность
-- **AES-128 (Fernet)** — аутентифицированное шифрование всех данных (HMAC-SHA256 + AES-CBC).
-- **PBKDF2-HMAC-SHA256** с **600 000 итераций** — устойчивый к перебору вывод ключа из мастер-пароля.
-- **Отдельная соль** (16 байт из `secrets`) и **meta-файл с версией KDF** — для плавного апгрейда без потери данных.
-- **Атомарная запись** всех файлов через `mkstemp + os.replace` — крах процесса не портит хранилище.
-- **Автоочистка буфера обмена** через 30 секунд (настраивается).
-- **Блокировка сессии при бездействии** (по умолчанию 5 минут) — с закрытием всех открытых диалогов.
-- **Задержка на неверный пароль** — 3 попытки, затем экспоненциальный backoff (2 → 4 → 8 → 16 → 30 сек).
-- **Single-instance lock** — вторая копия не запустится и не перетрёт данные первой.
+### Security
+- **AES-128 (Fernet)** — authenticated encryption of all data (HMAC-SHA256 + AES-CBC).
+- **PBKDF2-HMAC-SHA256** with **600,000 iterations** — brute-force resistant master password key derivation.
+- **Separate salt** (16 bytes from `secrets`) and **KDF meta-file** — for seamless upgrades without data loss.
+- **Atomic writes** of all files via `mkstemp + os.replace` — a process crash won't corrupt the vault.
+- **Clipboard auto-clear** after 30 seconds (configurable).
+- **Session lock on inactivity** (5 minutes by default) — closes all open dialogs.
+- **Failed login delay** — 3 attempts, then exponential backoff (2 → 4 → 8 → 16 → 30 sec).
+- **Single-instance lock** — a second copy won't launch and overwrite the first.
 
-### Мультипользовательский режим
-- Каждый пользователь хранится в **отдельной папке** `{username}/{username}.nimbus*`.
-- **Вход по одному паролю** — программа перебирает всех пользователей и входит под тем, чей пароль подошёл.
-- Кнопка **«＋»** на экране входа — быстрое создание нового пользователя.
-- Минимум **10 символов** для мастер-пароля.
+### Multi-user mode
+- Each user is stored in a **separate folder** `{username}/{username}.nimbus*`.
+- **One-password login** — the app iterates through all users and logs into the one whose password matches.
+- **«＋»** button on the login screen — quickly create a new user.
+- Minimum **10 characters** for the master password.
 
-### Интерфейс
-- **Светлая и тёмная темы** + автоматическое определение системной.
-- **Русский и английский** языки (переключается на лету).
-- **Современные плитки** с плавным hover и подсветкой выбранной строки.
-- **Уведомления** о статусе операций прямо в главном окне (без всплывающих попапов).
-- **Трей-иконка** — программа живёт в фоне, разлогинивает при закрытии и восстанавливается двойным кликом.
+### Interface
+- **Light and dark themes** + automatic system theme detection.
+- **Russian and English** languages (switches on the fly).
+- **Modern tiles** with smooth hover effects and active row highlighting.
+- **Status notifications** directly in the main window (no popups).
+- **Tray icon** — app runs in the background, logs out on close, and restores on double-click.
 
-### Работа с данными
-- Создание, редактирование, удаление записей (сервис / логин / пароль / описание).
-- **Поиск в реальном времени** по сервису, логину и описанию.
-- **Генератор паролей** (по умолчанию 18 символов, настраивается).
-- **Копирование любого поля** одним кликом по плитке.
-- **Показ/скрытие пароля** двойным кликом.
-- **Импорт из CSV** (`;`-разделитель).
-- **Экспорт в CSV** с BOM-маркером — Excel корректно открывает кириллицу.
-- **Экспорт `.nimbus`** — ZIP-архив с зашифрованными файлами пользователя для бэкапа.
+### Data Management
+- Create, edit, delete records (service / login / password / description).
+- **Real-time search** by service, login, and description.
+- **Password generator** (18 chars by default, configurable).
+- **Copy any field** with a single click on the tile.
+- **Reveal/hide password** on double-click.
+- **Import from CSV** (`;` delimiter).
+- **Export to CSV** with BOM marker — Excel opens Cyrillic correctly.
+- **Export `.nimbus`** — ZIP archive with encrypted user files for backup.
 
-### Удобство
-- **Автозапуск при старте системы** (Windows registry).
-- **Запуск свёрнутым в трей**.
-- **Настройка длины пароля, времени блокировки, автоочистки буфера**.
-- **Локализованные диалоги подтверждения** — никаких кривых `QMessageBox`.
+### Convenience
+- **Autostart on system boot** (Windows registry).
+- **Start minimized to tray**.
+- **Configurable password length, lock timeout, clipboard clear timeout**.
+- **Localized confirmation dialogs** — no ugly `QMessageBox`.
 
 ---
 
-## 📸 Скриншоты
+## 📸 Screenshots
 
-### Экран входа
-Минималистичный вход по одному паролю. Кнопка **＋** справа сверху — создание нового пользователя.
+### Login Screen
+Minimalist one-password login. The **＋** button in the top right creates a new user.
 
 ![login](docs/login.png)
 
-### Главное окно — светлая тема
-Плитки с записями, поиск, панель действий, переключатель темы.
+### Main Window — Light Theme
+Tiles with records, search, action panel, theme switcher.
 
 ![main-light](docs/main-light.png)
 
-### Главное окно — тёмная тема
-Тот же интерфейс в тёмной палитре (чёрный + жёлтый акцент).
+### Main Window — Dark Theme
+Same interface in dark palette (black + yellow accent).
 
 ![main-dark](docs/main-dark.png)
 
-### Создание / редактирование записи
-Поля сервиса, логина, пароля с генератором, описания.
+### Create / Edit Record
+Service, login, password with generator, and description fields.
 
 ![edit](docs/edit-dialog.png)
 
-### Настройки
-Три секции — **ОБЩИЕ** (язык, тема), **ЗАПУСК** (автозапуск, свёрнутый режим), **БЕЗОПАСНОСТЬ** (длина пароля, таймауты, подтверждение удаления).
+### Settings
+Three sections — **GENERAL** (language, theme), **STARTUP** (autostart, minimized mode), **SECURITY** (password length, timeouts, delete confirmation).
 
 ![settings](docs/settings.png)
 
 ---
 
-## 🛠 Зависимости
+## 🛠 Dependencies
 
-- **Python 3.10+** (рекомендую 3.11–3.13)
-- **PyQt6 ≥ 6.5** — интерфейс
-- **cryptography ≥ 41** — шифрование (Fernet + PBKDF2)
-- **pyperclip ≥ 1.8** — буфер обмена (опционально, но без него нельзя копировать пароли)
-- **pyinstaller ≥ 6** — только для сборки `.exe`, в рантайме не нужен
+- **Python 3.10+** (3.11–3.13 recommended)
+- **PyQt6 ≥ 6.5** — GUI
+- **cryptography ≥ 41** — encryption (Fernet + PBKDF2)
+- **pyperclip ≥ 1.8** — clipboard (optional, but required to copy passwords)
+- **pyinstaller ≥ 6** — build only, not needed at runtime
 
 `requirements.txt`:
 
