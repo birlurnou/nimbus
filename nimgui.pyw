@@ -1569,6 +1569,7 @@ class LoginView(QWidget):
             return
         users = nimbus.list_existing_users()
         if not users:
+            self.pw_edit.clear()
             self._set_status_key("reg_first_required", theme.current()["danger"])
             return
         matched_paths = None
