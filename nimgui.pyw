@@ -1431,17 +1431,38 @@ class LoginView(QWidget):
         self.status.setMaximumHeight(80)
         layout.addWidget(self.status)
 
+        self._status_clear_timer = QTimer(self)
+        self._status_clear_timer.setSingleShot(True)
+        self._status_clear_timer.timeout.connect(self._clear_status)
+
         outer.addWidget(container, alignment=Qt.AlignmentFlag.AlignCenter)
         outer.addStretch(1)
         theme.subscribe(lambda _: self._restyle())
         i18n.subscribe(lambda: self._on_lang_change())
         self._restyle()
 
+    def _clear_status(self):
+        try:
+            self._status_key = None
+            self._status_text = None
+            self._apply_status("", theme.current()["text_muted"])
+        except RuntimeError:
+            pass
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            try:
+                self.pw_edit.clearFocus()
+            except RuntimeError:
+                pass
+        super().mousePressEvent(event)
+
     def show_text(self, text, color=None):
         self._status_key = None
         self._status_text = text
         self._status_color = color or theme.current()["text_muted"]
         self._apply_status(text, self._status_color)
+        self._status_clear_timer.start(6000)
 
     def show_info(self, key):
         self._set_status_key(key, theme.current()["accent"])
@@ -1499,8 +1520,10 @@ class LoginView(QWidget):
         self._status_color = color
         if key is None:
             self._apply_status("", theme.current()["text_muted"])
+            self._status_clear_timer.stop()
         else:
             self._apply_status(t(key), color)
+            self._status_clear_timer.start(6000)
 
     def _apply_status(self, text, color=None):
         try:
