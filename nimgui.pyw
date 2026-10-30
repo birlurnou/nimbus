@@ -870,6 +870,13 @@ class HoverTableView(QTableView):
         self._hover_col = -1
         self._hover_btn = -1
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            index = self.indexAt(event.pos())
+            if not index.isValid():
+                self.clearSelection()
+        super().mousePressEvent(event)
+
     def mouseMoveEvent(self, event):
         index = self.indexAt(event.pos())
         row = index.row() if index.isValid() else -1
@@ -1718,6 +1725,11 @@ class RegisterDialog(QDialog):
         self.confirm_edit.returnPressed.connect(self._on_create)
         QTimer.singleShot(0, self.username_edit.setFocus)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
+        super().mousePressEvent(event)
+
     def _on_mode_changed(self, value):
         self.restore_mode = (value == "restore")
         show_new = not self.restore_mode
@@ -1929,6 +1941,11 @@ class RecordDialog(QDialog):
         self._restyle()
         QTimer.singleShot(0, self._clear_focus)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
+        super().mousePressEvent(event)
+
     def _clear_focus(self):
         try:
             for e in (self.service_edit, self.username_edit, self.password_edit, self.desc_edit):
@@ -2037,6 +2054,11 @@ class MessageDialog(QDialog):
         self._restyle()
         self.confirm_btn.setFocus()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
+        super().mousePressEvent(event)
+
     def _restyle(self):
         try:
             t_ = theme.current()
@@ -2103,6 +2125,11 @@ class ConfirmMasterDialog(QDialog):
         self.pw_edit.returnPressed.connect(self._verify)
         self.pw_edit.textChanged.connect(lambda _: self._clear_err())
         self.pw_edit.setFocus()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
+        super().mousePressEvent(event)
 
     def _retranslate(self):
         try:
@@ -2218,6 +2245,11 @@ class SettingsDialog(QDialog):
         theme.subscribe(lambda _: self._restyle())
         i18n.subscribe(self._retranslate)
         self._restyle()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
+        super().mousePressEvent(event)
 
     def _tab_container(self):
         w = QWidget()
@@ -2727,6 +2759,15 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)
         self._setup_tray()
         QTimer.singleShot(150, self._ensure_user)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            try:
+                if hasattr(self, "table"):
+                    self.table.clearSelection()
+            except RuntimeError:
+                pass
+        super().mousePressEvent(event)
 
     def _ensure_user(self):
         if not nimbus.list_existing_users():
