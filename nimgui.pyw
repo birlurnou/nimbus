@@ -3433,10 +3433,9 @@ class MainWindow(QMainWindow):
         self._show_status(msg)
 
     def _export_archive(self):
-        if not self._confirm_master("confirm_pw_action_export"):
-            self._show_status(t("status_cancelled")); return
         if not self.session.paths:
-            self._show_status(t("status_cancelled")); return
+            self._show_status(t("status_cancelled"));
+            return
         dest = QFileDialog.getExistingDirectory(self, t("dlg_export_archive_title"), "")
         if not dest:
             return
