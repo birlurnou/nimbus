@@ -3457,7 +3457,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "model"):
                 self.model.refresh()
             self._update_count()
-            self._update_action_buttons()
+            self._update_action_btns()
         except SystemExit:
             self._sync_last_error = True
             self._sync_last_error_text = (
