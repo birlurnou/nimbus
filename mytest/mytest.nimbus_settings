@@ -1,6 +1,6 @@
 {
   "language": "ru",
-  "theme": "light",
+  "theme": "dark",
   "autostart": false,
   "start_minimized": false,
   "password_length": 18,

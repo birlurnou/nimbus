@@ -2230,7 +2230,7 @@ class ChangeMasterPasswordDialog(QDialog):
         self.new_password = None
         self._step = 1
         self.setWindowTitle(t("change_pw_title"))
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -2242,37 +2242,71 @@ class ChangeMasterPasswordDialog(QDialog):
         layout.addWidget(self.title_label)
         layout.addSpacing(10)
 
+        # --- old password block ---
         self.old_block = QWidget()
         old_lay = QVBoxLayout(self.old_block)
         old_lay.setContentsMargins(0, 0, 0, 0)
         old_lay.setSpacing(10)
         self.lbl_old = QLabel(t("change_pw_current"))
         old_lay.addWidget(self.lbl_old)
+
+        old_row = QHBoxLayout(); old_row.setSpacing(8)
         self.old_pw_edit = QLineEdit()
         self.old_pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.old_pw_edit.setPlaceholderText(t("ph_master"))
         self.old_pw_edit.setMinimumHeight(44)
-        old_lay.addWidget(self.old_pw_edit)
+        old_row.addWidget(self.old_pw_edit, 1)
+        self.old_show_btn = QPushButton(t("btn_show"))
+        self.old_show_btn.setCheckable(True)
+        self.old_show_btn.setFixedSize(110, 44)
+        self.old_show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.old_show_btn.toggled.connect(
+            lambda c: self._toggle_show(self.old_pw_edit, self.old_show_btn, c))
+        old_row.addWidget(self.old_show_btn)
+        old_lay.addLayout(old_row)
         layout.addWidget(self.old_block)
 
+        # --- new password block ---
         self.new_block = QWidget()
         new_lay = QVBoxLayout(self.new_block)
         new_lay.setContentsMargins(0, 0, 0, 0)
         new_lay.setSpacing(10)
         self.lbl_new = QLabel(t("change_pw_new"))
         new_lay.addWidget(self.lbl_new)
+
+        new_row = QHBoxLayout(); new_row.setSpacing(8)
         self.new_pw_edit = QLineEdit()
         self.new_pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.new_pw_edit.setPlaceholderText(t("ph_password_new"))
         self.new_pw_edit.setMinimumHeight(44)
-        new_lay.addWidget(self.new_pw_edit)
+        new_row.addWidget(self.new_pw_edit, 1)
+        self.new_show_btn = QPushButton(t("btn_show"))
+        self.new_show_btn.setCheckable(True)
+        self.new_show_btn.setFixedSize(110, 44)
+        self.new_show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_show_btn.toggled.connect(
+            lambda c: self._toggle_show(self.new_pw_edit, self.new_show_btn, c))
+        new_row.addWidget(self.new_show_btn)
+        new_lay.addLayout(new_row)
+
         self.lbl_confirm = QLabel(t("change_pw_confirm"))
         new_lay.addWidget(self.lbl_confirm)
+
+        confirm_row = QHBoxLayout(); confirm_row.setSpacing(8)
         self.confirm_edit = QLineEdit()
         self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.confirm_edit.setPlaceholderText(t("ph_password_confirm"))
         self.confirm_edit.setMinimumHeight(44)
-        new_lay.addWidget(self.confirm_edit)
+        confirm_row.addWidget(self.confirm_edit, 1)
+        self.confirm_show_btn = QPushButton(t("btn_show"))
+        self.confirm_show_btn.setCheckable(True)
+        self.confirm_show_btn.setFixedSize(110, 44)
+        self.confirm_show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.confirm_show_btn.toggled.connect(
+            lambda c: self._toggle_show(self.confirm_edit, self.confirm_show_btn, c))
+        confirm_row.addWidget(self.confirm_show_btn)
+        new_lay.addLayout(confirm_row)
+
         self.new_block.setVisible(False)
         layout.addWidget(self.new_block)
 
@@ -2286,22 +2320,32 @@ class ChangeMasterPasswordDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(14)
         btn_row.addStretch(1)
+
         self.cancel_btn = QPushButton(t("btn_cancel"))
         self.cancel_btn.setFixedSize(180, 44)
         self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.setAutoDefault(False)
+        self.cancel_btn.setDefault(False)
         self.cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_btn)
+
         self.next_btn = QPushButton(t("change_pw_next"))
         self.next_btn.setFixedSize(180, 44)
         self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.next_btn.setAutoDefault(False)
+        self.next_btn.setDefault(False)
         self.next_btn.clicked.connect(self._on_next)
         btn_row.addWidget(self.next_btn)
+
         self.save_btn = QPushButton(t("btn_save"))
         self.save_btn.setFixedSize(180, 44)
         self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_btn.setAutoDefault(False)
+        self.save_btn.setDefault(False)
         self.save_btn.clicked.connect(self._on_save)
         self.save_btn.setVisible(False)
         btn_row.addWidget(self.save_btn)
+
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
@@ -2312,6 +2356,11 @@ class ChangeMasterPasswordDialog(QDialog):
         self.new_pw_edit.returnPressed.connect(self._on_save)
         self.confirm_edit.returnPressed.connect(self._on_save)
         self.old_pw_edit.setFocus()
+
+    def _toggle_show(self, edit, btn, checked):
+        edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
+        btn.setText(t("btn_hide") if checked else t("btn_show"))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -2331,6 +2380,12 @@ class ChangeMasterPasswordDialog(QDialog):
             self.cancel_btn.setText(t("btn_cancel"))
             self.next_btn.setText(t("change_pw_next"))
             self.save_btn.setText(t("btn_save"))
+            self.old_show_btn.setText(
+                t("btn_hide") if self.old_show_btn.isChecked() else t("btn_show"))
+            self.new_show_btn.setText(
+                t("btn_hide") if self.new_show_btn.isChecked() else t("btn_show"))
+            self.confirm_show_btn.setText(
+                t("btn_hide") if self.confirm_show_btn.isChecked() else t("btn_show"))
         except RuntimeError:
             pass
 
@@ -2361,7 +2416,12 @@ class ChangeMasterPasswordDialog(QDialog):
         pw = self.old_pw_edit.text()
         if not pw:
             self._show_err(t("confirm_pw_need")); return
-        if not nimbus.verify_master_password(pw, self.salt, self.key_file):
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            ok = nimbus.verify_master_password(pw, self.salt, self.key_file)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not ok:
             self._show_err(t("change_pw_wrong"))
             self.old_pw_edit.clear()
             self.old_pw_edit.setFocus()
@@ -2600,7 +2660,11 @@ class SettingsDialog(QDialog):
             return
         if not dlg.old_password or not dlg.new_password:
             return
-        ok, err = mw._do_change_master_password(dlg.old_password, dlg.new_password)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            ok, err = mw._do_change_master_password(dlg.old_password, dlg.new_password)
+        finally:
+            QApplication.restoreOverrideCursor()
         if not ok:
             QMessageBox.critical(self, t("title_error"), t("change_pw_err", e=err))
             return
@@ -3338,15 +3402,25 @@ class MainWindow(QMainWindow):
             salt = nimbus.load_or_create_salt(paths.salt_file)
             iterations = nimbus.get_kdf_iterations(paths.meta_file)
 
-            if not nimbus.verify_master_password(old_pw, salt, paths.key_file):
+            # Проверяем старый пароль через расшифровку key-файла (1 KDF),
+            # и сразу переиспользуем тот же crypto для чтения storage.
+            try:
+                old_crypto = nimbus.EncryptionManager(old_pw, salt, iterations=iterations)
+                with open(paths.key_file, 'r', encoding='utf-8') as f:
+                    enc_key = f.read().strip()
+                if old_crypto.decrypt(enc_key) != old_pw:
+                    return False, "wrong_old_password"
+            except Exception:
                 return False, "wrong_old_password"
 
-            old_crypto = nimbus.EncryptionManager(old_pw, salt, iterations=iterations)
             old_storage = nimbus.Storage(old_crypto, paths.data_file)
             raw_data = list(old_storage._raw_data)
 
             new_crypto = nimbus.EncryptionManager(new_pw, salt, iterations=iterations)
-            new_storage = nimbus.Storage(new_crypto, paths.data_file)
+
+            new_storage = nimbus.Storage.__new__(nimbus.Storage)
+            new_storage.file = paths.data_file
+            new_storage.crypto = new_crypto
             new_storage._raw_data = raw_data
             new_storage._sync_data()
             new_storage._save()
