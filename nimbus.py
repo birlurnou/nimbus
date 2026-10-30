@@ -46,10 +46,12 @@ KDF_ITERATIONS = KDF_ITERATIONS_V2
 STORAGE_VERSION = 2
 META_VERSION = 2
 
-MIN_MASTER_PASSWORD_LEN = 10          # ← было 12, теперь 10
+MIN_MASTER_PASSWORD_LEN = 10
 SESSION_TIMEOUT = 300
 MAX_LOGIN_ATTEMPTS = 3
 CLIPBOARD_CLEAR_SECONDS = 30
+
+TOMBSTONE_TTL_SECONDS = 30 * 86400
 
 
 # ---------------------------------------------------------------------------
@@ -93,21 +95,14 @@ class UserPaths:
         ]
 
     def export_to_zip(self, dest_dir: str) -> tuple[bool, str]:
-        """
-        Упаковывает все файлы пользователя в ZIP-архив: {dest_dir}/{username}.zip
-        Внутри архива создаётся папка {username}/ с файлами.
-        Обрабатывает заблокированный .lock файл (создаёт заглушку).
-        Использует временный файл для атомарной записи.
-        """
         zip_filename = f"{self.username}.zip"
         full_zip_path = os.path.join(dest_dir, zip_filename)
 
         try:
-            # Создаём временный файл в той же папке для атомарности
             tmp_fd, tmp_path = tempfile.mkstemp(
                 prefix='.nimbus_zip_', dir=dest_dir, suffix='.zip'
             )
-            os.close(tmp_fd)  # zipfile откроет его сам
+            os.close(tmp_fd)
 
             with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 added = 0
@@ -123,7 +118,6 @@ class UserPaths:
                         zf.write(src, arcname)
                         added += 1
                     except PermissionError:
-                        # Заблокированный .lock — пишем заглушку
                         if src.endswith('.lock'):
                             try:
                                 zf.writestr(arcname, "exported (original locked)\n")
@@ -135,7 +129,6 @@ class UserPaths:
                     except Exception:
                         skipped.append(os.path.basename(src))
 
-            # Атомарная замена
             os.replace(tmp_path, full_zip_path)
             try:
                 os.chmod(full_zip_path, 0o600)
@@ -148,7 +141,6 @@ class UserPaths:
             return True, msg
 
         except Exception as e:
-            # Убираем временный файл при ошибке
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
@@ -363,40 +355,61 @@ def verify_master_password(password: str, salt: bytes,
 
 
 # ---------------------------------------------------------------------------
-# Storage
+# Storage (с поддержкой sync: updated_at, tombstones, merge)
 # ---------------------------------------------------------------------------
 
 class Storage:
+
     def __init__(self, crypto: EncryptionManager, data_file: str = DATA_FILE):
         self.file = data_file
         self.crypto = crypto
-        self.data: list = self._load()
+        self._raw_data: list = self._load()
+        self._sync_data()
+
+    # ---------- внутреннее ----------
+
+    def _sync_data(self):
+        self.data = [r for r in self._raw_data if not r.get("_deleted")]
 
     def _load(self) -> list:
         if not os.path.exists(self.file):
             return []
-        with open(self.file, 'r', encoding='utf-8') as f:
+        with open(self.file, "r", encoding="utf-8") as f:
             encrypted = f.read().strip()
         if not encrypted:
             return []
         try:
             payload = json.loads(self.crypto.decrypt(encrypted))
         except Exception as e:
-            print(f'\nFATAL: cannot decrypt {self.file}: {e}')
+            print(f"\nFATAL: cannot decrypt {self.file}: {e}")
             print('Restore from backup or check master password / salt.')
             sys.exit(1)
 
+        if isinstance(payload, dict) and "records" in payload:
+            return list(payload["records"])
         if isinstance(payload, list):
-            return payload
-        if isinstance(payload, dict) and 'records' in payload:
-            return payload['records']
-        print(f'\nFATAL: unknown storage format in {self.file}')
+            return list(payload)
+        print(f"\nFATAL: unknown storage format in {self.file}")
         sys.exit(1)
 
     def _save(self) -> None:
-        payload = {'version': STORAGE_VERSION, 'records': self.data}
-        encrypted = self.crypto.encrypt(json.dumps(payload, ensure_ascii=False))
+        # выкидываем очень старые надгробия
+        cutoff = time.time() - TOMBSTONE_TTL_SECONDS
+        self._raw_data = [
+            r for r in self._raw_data
+            if not (r.get("_deleted") and (r.get("_deleted_at") or 0) < cutoff)
+        ]
+        payload = {
+            "version": STORAGE_VERSION,
+            "records": self._raw_data,
+            "updated_at": time.time(),
+        }
+        encrypted = self.crypto.encrypt(
+            json.dumps(payload, ensure_ascii=False)
+        )
         _atomic_write_text(self.file, encrypted)
+
+    # ---------- публичное ----------
 
     def get_all(self) -> list:
         return self.data
@@ -407,45 +420,120 @@ class Storage:
         return None
 
     def add(self, record: dict) -> None:
-        self.data.append(record)
+        record = dict(record)
+        record["updated_at"] = time.time()
+        self._raw_data.append(record)
+        self._sync_data()
         try:
             self._save()
         except Exception:
-            self.data.pop()
+            self._raw_data.pop()
+            self._sync_data()
             raise
 
     def update(self, index: int, record: dict) -> bool:
         if not (0 <= index < len(self.data)):
             return False
-        old = self.data[index]
-        self.data[index] = record
+        target = self.data[index]
+        raw_idx = next(
+            (i for i, r in enumerate(self._raw_data) if r is target), None
+        )
+        if raw_idx is None:
+            return False
+        record = dict(record)
+        record["updated_at"] = time.time()
+        old = self._raw_data[raw_idx]
+        self._raw_data[raw_idx] = record
+        self._sync_data()
         try:
             self._save()
         except Exception:
-            self.data[index] = old
+            self._raw_data[raw_idx] = old
+            self._sync_data()
             raise
         return True
 
     def delete(self, index: int) -> bool:
         if not (0 <= index < len(self.data)):
             return False
-        old = self.data.pop(index)
+        target = self.data[index]
+        raw_idx = next(
+            (i for i, r in enumerate(self._raw_data) if r is target), None
+        )
+        if raw_idx is None:
+            return False
+        old = self._raw_data[raw_idx]
+        tombstone = dict(target)
+        tombstone["_deleted"] = True
+        tombstone["_deleted_at"] = time.time()
+        self._raw_data[raw_idx] = tombstone
+        self._sync_data()
         try:
             self._save()
         except Exception:
-            self.data.insert(index, old)
+            self._raw_data[raw_idx] = old
+            self._sync_data()
             raise
         return True
 
     def delete_all(self) -> int:
-        old = list(self.data)
-        self.data.clear()
-        try:
-            self._save()
-        except Exception:
-            self.data.extend(old)
-            raise
-        return len(old)
+        n = len(self.data)
+        now = time.time()
+        for rec in self.data:
+            rec["_deleted"] = True
+            rec["_deleted_at"] = now
+        self._sync_data()
+        self._save()
+        return n
+
+    # ---------- merge ----------
+
+    def merge_records(self, other_records: list) -> int:
+        def key(r):
+            return (
+                safe_str(r.get("service", "")).lower(),
+                safe_str(r.get("username", "")).lower(),
+            )
+
+        remote_map = {key(r): r for r in other_records}
+        result, consumed = [], set()
+
+        for local_rec in self._raw_data:
+            k = key(local_rec)
+            if k in consumed:
+                continue
+            consumed.add(k)
+            remote_rec = remote_map.get(k)
+            if remote_rec is None:
+                result.append(local_rec)
+                continue
+
+            l_del = local_rec.get("_deleted_at") or 0
+            r_del = remote_rec.get("_deleted_at") or 0
+            l_upd = local_rec.get("updated_at") or 0
+            r_upd = remote_rec.get("updated_at") or 0
+
+            if l_del and r_del:
+                result.append(local_rec if l_del >= r_del else remote_rec)
+            elif l_del:
+                result.append(remote_rec if r_upd > l_del else local_rec)
+            elif r_del:
+                result.append(local_rec if l_upd > r_del else remote_rec)
+            else:
+                result.append(local_rec if l_upd >= r_upd else remote_rec)
+
+        for remote_rec in other_records:
+            k = key(remote_rec)
+            if k in consumed:
+                continue
+            consumed.add(k)
+            result.append(remote_rec)
+
+        self._raw_data = result
+        self._sync_data()
+        return len(self.data)
+
+    # ---------- экспорт / импорт ----------
 
     def export_to_file(self, filepath: str) -> tuple[bool, str]:
         try:
@@ -453,7 +541,6 @@ class Storage:
             directory = os.path.dirname(full_path) or '.'
             if not os.path.exists(directory):
                 os.makedirs(directory, exist_ok=True)
-                print(f'Created directory: {directory}')
 
             if not os.access(directory, os.W_OK):
                 return False, f'No write permission in directory: {directory}'
@@ -529,12 +616,18 @@ class Storage:
             if not new_records:
                 return False, f'No records imported. Errors: {len(errors)}'
 
-            n_before = len(self.data)
-            self.data.extend(new_records)
+            now = time.time()
+            for r in new_records:
+                r["updated_at"] = now
+
+            n_before = len(self._raw_data)
+            self._raw_data.extend(new_records)
+            self._sync_data()
             try:
                 self._save()
             except Exception as e:
-                del self.data[n_before:]
+                del self._raw_data[n_before:]
+                self._sync_data()
                 return False, f'Import failed (save): {e}'
 
             return True, (
@@ -717,19 +810,16 @@ def copy_to_clipboard(text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI commands
+# CLI commands (без изменений)
 # ---------------------------------------------------------------------------
 
-def cmd_show(args: list[str], session: Session) -> None:
+def cmd_show(args, session):
     storage = session.storage
     data = storage.get_all()
-
     if not args:
         print("Usage: sh l | sh <index> [copy]")
         return
-
     first = args[0].lower()
-
     if first in ('l', 'list', 'lst') or first.startswith('l'):
         if not data:
             print('Storage is empty')
@@ -741,7 +831,6 @@ def cmd_show(args: list[str], session: Session) -> None:
                 f"(username: {safe_str(rec.get('username'))})"
             )
         return
-
     idx, err = parse_index(first, len(data))
     if err:
         print(err)
@@ -753,12 +842,11 @@ def cmd_show(args: list[str], session: Session) -> None:
 [ Logn ]  {safe_str(rec.get('username'))}
 [ Pass ]  {safe_str(rec.get('password'))}
 [ Desc ]  {safe_str(rec.get('description'))}''')
-
     if 'copy' in args or '-c' in args:
         copy_to_clipboard(rec.get('password', ''))
 
 
-def cmd_find(args: list[str], session: Session) -> None:
+def cmd_find(args, session):
     if not args:
         print('Please specify search term')
         return
@@ -772,7 +860,6 @@ def cmd_find(args: list[str], session: Session) -> None:
         ]).lower()
         if query in hay:
             results.append((i, rec))
-
     if not results:
         print('No matches found')
         return
@@ -785,7 +872,7 @@ def cmd_find(args: list[str], session: Session) -> None:
         )
 
 
-def cmd_add(args: list[str], session: Session) -> None:
+def cmd_add(args, session):
     if len(args) < 3:
         print('Usage: add <service> <username> <password|autogen> [description...]')
         return
@@ -794,7 +881,6 @@ def cmd_add(args: list[str], session: Session) -> None:
         password = generate_password()
         print(f'Generated password: {password}')
     description = ' '.join(args[3:]) if len(args) > 3 else ''
-
     session.storage.add({
         'service': service,
         'username': username,
@@ -804,7 +890,7 @@ def cmd_add(args: list[str], session: Session) -> None:
     print(f'Added successfully ({service})')
 
 
-def _apply_update(session: Session, idx: int, new_record: dict, label: str) -> None:
+def _apply_update(session, idx, new_record, label):
     old = session.storage.get(idx)
     if old is None:
         print('Record not found')
@@ -824,7 +910,7 @@ Are you sure you want to update index [{idx + 1}]?
         print('Update canceled')
 
 
-def cmd_update(args: list[str], session: Session) -> None:
+def cmd_update(args, session):
     if not args:
         print('Usage: upd <index> [1|2|3|4|service|login|password|description]')
         return
@@ -840,7 +926,6 @@ def cmd_update(args: list[str], session: Session) -> None:
         'password': old.get('password', ''),
         'description': old.get('description', ''),
     }
-
     if len(args) == 1:
         print(f'''Current:
 [ Svcs ]  {safe_str(old.get('service'))}
@@ -860,7 +945,6 @@ def cmd_update(args: list[str], session: Session) -> None:
         new['description'] = ' '.join(parts[3:]) if len(parts) > 3 else ''
         _apply_update(session, idx, new, 'Record')
         return
-
     param = args[1].lower()
     field_map = {
         '1': 'service', 'serv': 'service', 'service': 'service',
@@ -872,23 +956,20 @@ def cmd_update(args: list[str], session: Session) -> None:
     if field is None:
         print(f'Unknown parameter: {param}')
         return
-
     prompt = f'Enter new {field} for item {idx + 1} (old: {safe_str(old.get(field))}): '
     value = input(prompt)
     if field == 'password' and value == 'autogen':
         value = generate_password()
         print(f'Generated password: {value}')
-
     new = dict(base)
     new[field] = value
     _apply_update(session, idx, new, field.capitalize())
 
 
-def cmd_delete(args: list[str], session: Session) -> None:
+def cmd_delete(args, session):
     if not args:
         print('Usage: del <index> | del all')
         return
-
     if args[0].lower() == 'all':
         total = len(session.storage.get_all())
         if total == 0:
@@ -901,7 +982,6 @@ def cmd_delete(args: list[str], session: Session) -> None:
         session.storage.delete_all()
         print('All records deleted')
         return
-
     idx, err = parse_index(args[0], len(session.storage.get_all()))
     if err:
         print(err)
@@ -914,7 +994,7 @@ def cmd_delete(args: list[str], session: Session) -> None:
         print('Removal completed')
 
 
-def cmd_autogen(args: list[str], session: Session) -> None:
+def cmd_autogen(args, session):
     try:
         if len(args) == 0:
             print(generate_password())
@@ -929,7 +1009,7 @@ def cmd_autogen(args: list[str], session: Session) -> None:
         print(f'Error: {e}')
 
 
-def cmd_export(args: list[str], session: Session) -> None:
+def cmd_export(args, session):
     if not args:
         print('Usage: export <path>')
         return
@@ -940,7 +1020,7 @@ def cmd_export(args: list[str], session: Session) -> None:
     print(msg)
 
 
-def cmd_import(args: list[str], session: Session) -> None:
+def cmd_import(args, session):
     if not args:
         print('Usage: import <path>')
         return
@@ -955,7 +1035,7 @@ def cmd_import(args: list[str], session: Session) -> None:
     print(msg)
 
 
-def cmd_salt(args: list[str], session: Session) -> None:
+def cmd_salt(args, session):
     if not confirm_master_password(session):
         print('Wrong password! Canceled.')
         return
@@ -969,7 +1049,7 @@ def cmd_salt(args: list[str], session: Session) -> None:
     print(f'Salt length:   {len(salt)} bytes')
 
 
-def cmd_stats(args: list[str], session: Session) -> None:
+def cmd_stats(args, session):
     data = session.storage.get_all()
     size = os.path.getsize(DATA_FILE) if os.path.exists(DATA_FILE) else 0
     mtime = time.strftime(
@@ -997,19 +1077,15 @@ Commands:
   autogen [length] [count]      - password generator (default length 18)
 
   add <service> <user> <pass|autogen> [description...]
-                                - add a record ('autogen' generates a password)
 
   upd <index>                   - update interactively
-  upd <index> <field>           - update one field:
-                                    field = 1|service | 2|login | 3|pass | 4|desc
-                                  (password field supports 'autogen')
+  upd <index> <field>           - update one field
 
   del <index>                   - delete a record
   del all                       - delete ALL records (requires 'DELETE')
 
-  export <path>                 - export all records to plaintext CSV (semicolon)
-
-  import <path>                 - import records from CSV (semicolon)
+  export <path>                 - export all records to plaintext CSV
+  import <path>                 - import records from CSV
 
   stats                         - show storage statistics
   salt                          - show salt (hex / base64)
@@ -1021,32 +1097,20 @@ Commands:
 '''.strip('\n')
 
 
-def cmd_help(args: list[str], session: Session) -> None:
+def cmd_help(args, session):
     print(HELP_TEXT)
 
 
-# ---------------------------------------------------------------------------
-# Dispatcher
-# ---------------------------------------------------------------------------
-
 COMMANDS = {
-    'sh': cmd_show,
-    'show': cmd_show,
+    'sh': cmd_show, 'show': cmd_show,
     'find': cmd_find,
     'add': cmd_add,
-    'upd': cmd_update,
-    'update': cmd_update,
-    'del': cmd_delete,
-    'delete': cmd_delete,
-    'autogen': cmd_autogen,
-    'ag': cmd_autogen,
-    'export': cmd_export,
-    'import': cmd_import,
-    'salt': cmd_salt,
-    'stats': cmd_stats,
-    'help': cmd_help,
-    'h': cmd_help,
-    '?': cmd_help,
+    'upd': cmd_update, 'update': cmd_update,
+    'del': cmd_delete, 'delete': cmd_delete,
+    'autogen': cmd_autogen, 'ag': cmd_autogen,
+    'export': cmd_export, 'import': cmd_import,
+    'salt': cmd_salt, 'stats': cmd_stats,
+    'help': cmd_help, 'h': cmd_help, '?': cmd_help,
 }
 
 
@@ -1055,23 +1119,19 @@ def dispatch(raw: str, session: Session) -> Optional[str]:
     if not raw:
         print("Type 'help' for reference")
         return None
-
     if raw in ('exit', 'quit', 'q!'):
         return 'exit'
     if raw == 'l!':
         session.logout()
         return None
-
     parts = split_args(raw)
     if not parts:
         return None
-
     cmd = parts[0].lower()
     handler = COMMANDS.get(cmd)
     if handler is None:
         print(f"Unknown command: '{cmd}'. Type 'help' for reference")
         return None
-
     try:
         handler(parts[1:], session)
     except KeyboardInterrupt:
@@ -1081,22 +1141,16 @@ def dispatch(raw: str, session: Session) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
 def main() -> None:
     session = Session()
     threading.Thread(
         target=inactivity_monitor, args=(session,), daemon=True
     ).start()
-
     while True:
         if session.expired:
             session.expired = False
             session.storage = None
             continue
-
         if not session.auth:
             clear_console()
             if not auth(session):
@@ -1104,16 +1158,13 @@ def main() -> None:
                 continue
             clear_console()
             continue
-
         try:
             raw = input('\n>> ')
         except (EOFError, KeyboardInterrupt):
             print('\nBye.')
             break
-
         session.touch()
         clear_console()
-
         if dispatch(raw, session) == 'exit':
             session.logout()
             print('Bye.')

@@ -1,14 +1,9 @@
-"""
-Nimbus — менеджер паролей с графическим интерфейсом.
-Запуск: python nimgui.py
-Требования: pip install PyQt6 pyperclip cryptography
-"""
-
 import os
 import sys
 import json
 import time
 import platform
+import threading
 from typing import Optional
 
 from PyQt6.QtCore import (
@@ -25,31 +20,23 @@ from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QButtonGroup, QMessageBox,
     QFileDialog, QTableView, QSystemTrayIcon, QMenu,
     QAbstractItemView, QStyledItemDelegate, QStyle,
-    QHeaderView, QStackedWidget
+    QHeaderView, QStackedWidget, QTabWidget, QPlainTextEdit
 )
 
 import nimbus
+import nimbus_sync
 
-
-# ---------------------------------------------------------------------------
-# Рабочий каталог
-# ---------------------------------------------------------------------------
 
 try:
     if getattr(sys, "frozen", False):
         _SCRIPT_DIR = os.path.dirname(sys.executable)
     else:
         _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
     if _SCRIPT_DIR and os.path.isdir(_SCRIPT_DIR):
         os.chdir(_SCRIPT_DIR)
 except Exception as e:
     print(f"[startup] chdir error: {e}")
 
-
-# ---------------------------------------------------------------------------
-# Single instance lock
-# ---------------------------------------------------------------------------
 
 _lock_file = None
 
@@ -70,10 +57,6 @@ def acquire_single_instance_lock() -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Настройки (per-user + global fallback)
-# ---------------------------------------------------------------------------
-
 LAST_USER_FILE = ".nimbus_last_user"
 
 DEFAULT_SETTINGS = {
@@ -86,10 +69,15 @@ DEFAULT_SETTINGS = {
     "session_timeout": 300,
     "confirm_delete": True,
     "minimize_to_tray": True,
+    "github_url": "",
+    "github_token": "",
+    "github_enabled": False,
+    "github_branch": "main",
+    "github_sync_interval": 600,
 }
 
 
-def load_last_user() -> Optional[str]:
+def load_last_user():
     if os.path.exists(LAST_USER_FILE):
         try:
             with open(LAST_USER_FILE, 'r', encoding='utf-8') as f:
@@ -99,14 +87,14 @@ def load_last_user() -> Optional[str]:
     return None
 
 
-def save_last_user(username: str):
+def save_last_user(username):
     try:
         nimbus._atomic_write_text(LAST_USER_FILE, username)
     except Exception:
         pass
 
 
-def load_settings(path: Optional[str]) -> dict:
+def load_settings(path):
     if not path or not os.path.exists(path):
         return dict(DEFAULT_SETTINGS)
     try:
@@ -121,7 +109,7 @@ def load_settings(path: Optional[str]) -> dict:
         return dict(DEFAULT_SETTINGS)
 
 
-def save_settings(path: Optional[str], data: dict) -> None:
+def save_settings(path, data):
     if not path:
         return
     try:
@@ -132,11 +120,11 @@ def save_settings(path: Optional[str], data: dict) -> None:
 
 
 class SettingsManager:
-    def __init__(self, path: Optional[str] = None):
+    def __init__(self, path=None):
         self.path = path
         self.data = load_settings(path) if path else dict(DEFAULT_SETTINGS)
 
-    def reload_for_user(self, path: Optional[str]):
+    def reload_for_user(self, path):
         self.path = path
         self.data = load_settings(path) if path else dict(DEFAULT_SETTINGS)
 
@@ -147,7 +135,7 @@ class SettingsManager:
         self.data[key] = value
         save_settings(self.path, self.data)
 
-    def update(self, updates: dict):
+    def update(self, updates):
         self.data.update(updates)
         save_settings(self.path, self.data)
 
@@ -162,10 +150,6 @@ if _init_last_user:
 settings = SettingsManager(_init_settings_path)
 
 
-# ---------------------------------------------------------------------------
-# i18n
-# ---------------------------------------------------------------------------
-
 STRINGS = {
     "login_hint_create": {"ru": "Придумайте мастер-пароль", "en": "Create a master password"},
     "login_hint_repeat": {"ru": "Повторите пароль", "en": "Repeat the password"},
@@ -178,10 +162,10 @@ STRINGS = {
     "login_decrypt_err": {"ru": "Не удалось расшифровать хранилище", "en": "Failed to decrypt storage"},
     "login_err": {"ru": "Ошибка: {e}", "en": "Error: {e}"},
     "session_expired": {"ru": "Сессия истекла из-за неактивности", "en": "Session expired due to inactivity"},
-
     "btn_new_user_tip": {"ru": "Новый пользователь", "en": "New user"},
 
     "title_register": {"ru": "Создание пользователя", "en": "Create user"},
+    "title_restore": {"ru": "Восстановить с GitHub", "en": "Restore from GitHub"},
     "field_username": {"ru": "Логин", "en": "Login"},
     "field_password_confirm": {"ru": "Повторите пароль", "en": "Repeat password"},
     "ph_username": {"ru": "например, alice", "en": "e.g. alice"},
@@ -193,13 +177,61 @@ STRINGS = {
     "reg_err_bad_chars": {"ru": "Недопустимые символы в логине", "en": "Invalid characters in login"},
     "reg_err_exists": {"ru": "Пользователь с таким логином уже существует", "en": "User with this login already exists"},
     "reg_err_generic": {"ru": "Не удалось создать пользователя: {e}", "en": "Failed to create user: {e}"},
+    "reg_err_no_url": {"ru": "Укажите URL репозитория", "en": "Enter repository URL"},
     "reg_ok": {"ru": "Пользователь «{name}» создан", "en": "User «{name}» created"},
+    "restore_ok": {"ru": "Данные восстановлены. Пользователь: {name}. Введите мастер-пароль.", "en": "Restored. User: {name}. Enter master password."},
     "reg_first_required": {"ru": "Создайте первого пользователя", "en": "Create the first user"},
+
+    "reg_mode_new": {"ru": "Новый пользователь", "en": "New user"},
+    "reg_mode_restore": {"ru": "Восстановить с GitHub", "en": "Restore from GitHub"},
+    "label_github_url": {"ru": "GitHub URL", "en": "GitHub URL"},
+    "ph_github_url": {"ru": "https://github.com/user/repo.git", "en": "https://github.com/user/repo.git"},
+    "label_github_token": {"ru": "Personal Access Token", "en": "Personal Access Token"},
+    "ph_github_token": {"ru": "github_pat_…", "en": "github_pat_…"},
+    "gh_auth_help": {
+        "ru": (
+            "1. GitHub → Settings → Developer settings → Fine-grained tokens\n"
+            "2. Generate new token → Repository access: Only select repositories\n"
+            "3. Permissions: Contents → Read and write\n"
+            "4. Скопируй токен (github_pat_…) и вставь сюда\n"
+            "5. URL репозитория: https://github.com/user/repo.git"
+        ),
+        "en": (
+            "1. GitHub → Settings → Developer settings → Fine-grained tokens\n"
+            "2. Generate new token → Repository access: Only select repositories\n"
+            "3. Permissions: Contents → Read and write\n"
+            "4. Copy token (github_pat_…) and paste here\n"
+            "5. Repository URL: https://github.com/user/repo.git"
+        ),
+    },
+
+    "sync_ind_off": {"ru": "sync off", "en": "sync off"},
+    "sync_ind_syncing": {"ru": "syncing", "en": "syncing"},
+    "sync_ind_error": {"ru": "sync error", "en": "sync error"},
+
+    "tab_general": {"ru": "Общие", "en": "General"},
+    "tab_security": {"ru": "Безопасность", "en": "Security"},
+    "tab_github": {"ru": "GitHub Sync", "en": "GitHub Sync"},
+
+    "label_github_enabled": {"ru": "Включить синхронизацию", "en": "Enable sync"},
+    "label_github_url_field": {"ru": "URL репозитория", "en": "Repository URL"},
+    "label_github_branch": {"ru": "Ветка", "en": "Branch"},
+    "label_github_interval": {"ru": "Интервал (сек)", "en": "Interval (sec)"},
+    "btn_test_connection": {"ru": "Проверить подключение", "en": "Test connection"},
+    "gh_test_need_url": {"ru": "Введите URL", "en": "Enter URL"},
+    "gh_test_need_token": {"ru": "Введите токен", "en": "Enter token"},
+    "gh_test_testing": {"ru": "Проверка…", "en": "Testing…"},
+    "gh_test_ok": {"ru": "✓ Успешно", "en": "✓ Connection OK"},
+    "gh_test_fail": {"ru": "✗ {err}", "en": "✗ {err}"},
+    "gh_save_fail": {"ru": "Синхронизация не включена — сначала успешно пройди проверку подключения.",
+                     "en": "Sync not enabled — pass connection test first."},
 
     "search_placeholder": {"ru": "Поиск…", "en": "Search…"},
     "btn_logout": {"ru": "Выйти", "en": "Log out"},
+    "btn_settings": {"ru": "Настройки", "en": "Settings"},
     "btn_create": {"ru": "Создать", "en": "Create"},
-    "btn_import": {"ru": "Импорт", "en": "Import"},
+    "btn_restore": {"ru": "Восстановить", "en": "Restore"},
+    "btn_import": {"ru": "Импорт (text)", "en": "Import (text)"},
     "btn_export_text": {"ru": "Экспорт (text)", "en": "Export (text)"},
     "btn_export_archive": {"ru": "Экспорт (.nimbus)", "en": "Export (.nimbus)"},
     "btn_edit": {"ru": "Изменить", "en": "Edit"},
@@ -225,6 +257,8 @@ STRINGS = {
     "status_select": {"ru": "Выберите запись", "en": "Select a record"},
     "status_save_failed": {"ru": "Не удалось сохранить: {e}", "en": "Failed to save: {e}"},
     "status_load_failed": {"ru": "Не удалось прочитать: {e}", "en": "Failed to load: {e}"},
+    "status_sync_busy": {"ru": "Идёт синхронизация, попробуйте через секунду", "en": "Sync in progress, try again in a moment"},
+    "status_sync_err": {"ru": "Синхронизация: {e}", "en": "Sync: {e}"},
 
     "col_service": {"ru": "СЕРВИС", "en": "SERVICE"},
     "col_login": {"ru": "ЛОГИН", "en": "LOGIN"},
@@ -240,9 +274,9 @@ STRINGS = {
     "label_theme": {"ru": "Тема", "en": "Theme"},
     "label_autostart": {"ru": "Открывать при запуске системы", "en": "Open at system startup"},
     "label_start_min": {"ru": "Запускать свёрнутым в трей", "en": "Start minimized to tray"},
-    "label_pw_len": {"ru": "Длина пароля (количество символов)", "en": "Password length (characters)"},
-    "label_clip_timeout": {"ru": "Автоочистка буфера обмена (секунды)", "en": "Clipboard auto-clear (seconds)"},
-    "label_session_timeout": {"ru": "Блокировка при неактивности (секунды)", "en": "Lock on inactivity (seconds)"},
+    "label_pw_len": {"ru": "Длина пароля (генератор)", "en": "Password length (generator)"},
+    "label_clip_timeout": {"ru": "Автоочистка буфера обмена (сек)", "en": "Clipboard auto-clear (sec)"},
+    "label_session_timeout": {"ru": "Блокировка при неактивности (сек)", "en": "Lock on inactivity (sec)"},
     "label_confirm_delete": {"ru": "Подтверждать удаление записей", "en": "Confirm record deletion"},
     "label_minimize_tray": {"ru": "Сворачивать в трей при закрытии", "en": "Minimize to tray on close"},
 
@@ -258,9 +292,10 @@ STRINGS = {
     "title_confirm": {"ru": "Подтверждение", "en": "Confirmation"},
     "title_error": {"ru": "Ошибка", "en": "Error"},
 
-    "section_general": {"ru": "ОБЩИЕ", "en": "GENERAL"},
+    "section_appearance": {"ru": "ВНЕШНИЙ ВИД", "en": "APPEARANCE"},
     "section_startup": {"ru": "ЗАПУСК", "en": "STARTUP"},
     "section_security": {"ru": "БЕЗОПАСНОСТЬ", "en": "SECURITY"},
+    "section_sync": {"ru": "СИНХРОНИЗАЦИЯ GITHUB", "en": "GITHUB SYNC"},
 
     "seg_lang_ru": {"ru": "Русский", "en": "Russian"},
     "seg_lang_en": {"ru": "English", "en": "English"},
@@ -273,10 +308,8 @@ STRINGS = {
     "err_password_required": {"ru": "Введите пароль", "en": "Enter password"},
 
     "confirm_delete_title": {"ru": "Удалить запись «{s}»?", "en": "Delete record «{s}»?"},
-    "confirm_delete_msg": {
-        "ru": "Запись будет удалена навсегда. Это действие нельзя отменить.",
-        "en": "The record will be permanently deleted. This action cannot be undone.",
-    },
+    "confirm_delete_msg": {"ru": "Запись будет удалена навсегда. Это действие нельзя отменить.",
+                           "en": "The record will be permanently deleted."},
 
     "confirm_pw_action_default": {"ru": "продолжения", "en": "to continue"},
     "confirm_pw_action_import": {"ru": "импорта данных", "en": "to import data"},
@@ -287,27 +320,27 @@ STRINGS = {
 
     "tray_open": {"ru": "Открыть Nimbus", "en": "Open Nimbus"},
     "tray_quit": {"ru": "Закрыть программу", "en": "Quit"},
-    "tray_min_auth": {"ru": "Пароль сброшен. Программа свёрнута в трей.", "en": "Password reset. App minimized to tray."},
-    "tray_min": {"ru": "Программа свёрнута в трей.", "en": "App minimized to tray."},
-    "tray_min_hint": {"ru": " Двойной клик по иконке — открыть.", "en": " Double-click the icon to open."},
+    "tray_min_auth": {"ru": "Пароль сброшен. Программа свёрнута в трей.", "en": "Password reset. App minimized."},
+    "tray_min": {"ru": "Программа свёрнута в трей.", "en": "App minimized."},
+    "tray_min_hint": {"ru": " Двойной клик по иконке — открыть.", "en": " Double-click to open."},
 
     "dlg_import_title": {"ru": "Импорт из CSV", "en": "Import from CSV"},
     "dlg_export_title": {"ru": "Экспорт в CSV", "en": "Export to CSV"},
-    "dlg_export_archive_title": {"ru": "Выберите папку для ZIP-архива", "en": "Choose folder for ZIP archive"},
+    "dlg_export_archive_title": {"ru": "Выберите папку для ZIP", "en": "Choose folder for ZIP"},
     "file_csv": {"ru": "CSV файлы (*.csv);;Все файлы (*)", "en": "CSV files (*.csv);;All files (*)"},
     "export_default_filename": {"ru": "exportdata.csv", "en": "exportdata.csv"},
 
     "msg_already_running_title": {"ru": "Nimbus уже запущен", "en": "Nimbus is already running"},
-    "msg_already_running": {"ru": "Второй экземпляр программы не запущен. Закройте уже открытый Nimbus.", "en": "A second instance was not started. Please close the running Nimbus first."},
+    "msg_already_running": {"ru": "Второй экземпляр не запущен.", "en": "A second instance was not started."},
 }
 
 
 class I18n:
-    def __init__(self, lang: str = "ru"):
+    def __init__(self, lang="ru"):
         self.lang = lang if lang in ("ru", "en") else "ru"
         self._listeners = []
 
-    def t(self, key: str, **kw) -> str:
+    def t(self, key, **kw):
         entry = STRINGS.get(key)
         if entry is None:
             return key
@@ -319,10 +352,8 @@ class I18n:
                 return s
         return s
 
-    def set_language(self, lang: str):
-        if lang not in ("ru", "en"):
-            return
-        if lang == self.lang:
+    def set_language(self, lang):
+        if lang not in ("ru", "en") or lang == self.lang:
             return
         self.lang = lang
         for cb in list(self._listeners):
@@ -340,15 +371,11 @@ class I18n:
 i18n = I18n(settings.get("language", "ru"))
 
 
-def t(key: str, **kw) -> str:
+def t(key, **kw):
     return i18n.t(key, **kw)
 
 
-# ---------------------------------------------------------------------------
-# Автозапуск
-# ---------------------------------------------------------------------------
-
-def build_launch_command(include_minimized: bool = True) -> str:
+def build_launch_command(include_minimized=True):
     if getattr(sys, "frozen", False):
         exe = sys.executable
         script = None
@@ -365,25 +392,21 @@ def build_launch_command(include_minimized: bool = True) -> str:
                 exe = pythonw if os.path.exists(pythonw) else sys.executable
         else:
             exe = sys.executable
-
     parts = [f'"{exe}"']
     if script:
         parts.append(f'"{script}"')
     if include_minimized and settings.get("start_minimized", False):
         parts.append("--minimized")
-
     return " ".join(parts)
 
 
-def is_autostart_enabled() -> bool:
+def is_autostart_enabled():
     if platform.system() == "Windows":
         try:
             import winreg
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Run",
-                0, winreg.KEY_READ,
-            )
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                 0, winreg.KEY_READ)
             try:
                 winreg.QueryValueEx(key, "Nimbus")
                 winreg.CloseKey(key)
@@ -398,24 +421,17 @@ def is_autostart_enabled() -> bool:
     return False
 
 
-def set_autostart(enabled: bool) -> bool:
+def set_autostart(enabled):
     if platform.system() == "Windows":
         try:
             import winreg
             key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-
             try:
-                key = winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
-                )
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
             except FileNotFoundError:
-                key = winreg.CreateKeyEx(
-                    winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE
-                )
-
+                key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
             if enabled:
-                cmd = build_launch_command(include_minimized=True)
-                winreg.SetValueEx(key, "Nimbus", 0, winreg.REG_SZ, cmd)
+                winreg.SetValueEx(key, "Nimbus", 0, winreg.REG_SZ, build_launch_command(True))
             else:
                 try:
                     winreg.DeleteValue(key, "Nimbus")
@@ -427,7 +443,6 @@ def set_autostart(enabled: bool) -> bool:
             with open("autostart_error.log", "a", encoding="utf-8") as f:
                 f.write(f"Error: {e}\n")
             return False
-
     if platform.system() == "Linux":
         try:
             autostart_dir = os.path.expanduser("~/.config/autostart")
@@ -435,11 +450,9 @@ def set_autostart(enabled: bool) -> bool:
             if enabled:
                 os.makedirs(autostart_dir, exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
-                    f.write(
-                        "[Desktop Entry]\nType=Application\nName=Nimbus\n"
-                        f"Exec={build_launch_command(include_minimized=True)}\n"
-                        "X-GNOME-Autostart-enabled=true\n"
-                    )
+                    f.write("[Desktop Entry]\nType=Application\nName=Nimbus\n"
+                            f"Exec={build_launch_command(True)}\n"
+                            "X-GNOME-Autostart-enabled=true\n")
             else:
                 if os.path.exists(path):
                     os.remove(path)
@@ -450,11 +463,7 @@ def set_autostart(enabled: bool) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Иконка / qc / темы
-# ---------------------------------------------------------------------------
-
-def detect_system_theme() -> str:
+def detect_system_theme():
     app = QApplication.instance()
     if app:
         try:
@@ -468,24 +477,21 @@ def detect_system_theme() -> str:
     return "light"
 
 
-def get_icon_path() -> str:
+def get_icon_path():
     if getattr(sys, "frozen", False):
         base = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     else:
         base = os.path.dirname(os.path.abspath(__file__))
-
-    for p in [
-        os.path.join(base, "assets", "icon.ico"),
-        os.path.join(base, "assets", "icon.png"),
-        os.path.join(base, "icon.ico"),
-        os.path.join(base, "icon.png"),
-    ]:
+    for p in [os.path.join(base, "assets", "icon.ico"),
+              os.path.join(base, "assets", "icon.png"),
+              os.path.join(base, "icon.ico"),
+              os.path.join(base, "icon.png")]:
         if os.path.exists(p):
             return p
     return ""
 
 
-def make_default_icon() -> QIcon:
+def make_default_icon():
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.GlobalColor.transparent)
     p = QPainter(pixmap)
@@ -494,16 +500,14 @@ def make_default_icon() -> QIcon:
     p.setBrush(QColor("#6b5cb8"))
     p.drawRoundedRect(4, 4, 56, 56, 12, 12)
     p.setPen(QPen(QColor("white"), 0))
-    f = p.font()
-    f.setPointSize(30)
-    f.setBold(True)
+    f = p.font(); f.setPointSize(30); f.setBold(True)
     p.setFont(f)
     p.drawText(pixmap.rect(), int(Qt.AlignmentFlag.AlignCenter), "N")
     p.end()
     return QIcon(pixmap)
 
 
-def load_app_icon() -> QIcon:
+def load_app_icon():
     path = get_icon_path()
     if path:
         icon = QIcon(path)
@@ -512,7 +516,7 @@ def load_app_icon() -> QIcon:
     return make_default_icon()
 
 
-def qc(color: str) -> QColor:
+def qc(color):
     if not color:
         return QColor(0, 0, 0, 0)
     color = color.strip()
@@ -537,260 +541,156 @@ def qc(color: str) -> QColor:
 
 
 LIGHT = {
-    "name": "light",
-    "window_bg": "#f0f0f3",
-    "card": "#ffffff",
-    "card_border": "rgba(0, 0, 0, 18)",
-    "top_panel": "rgba(255, 255, 255, 235)",
-    "tile": "rgba(255, 255, 255, 180)",
-    "tile_hover": "rgba(255, 255, 255, 250)",
-    "row_hover": "rgba(0, 0, 0, 10)",
-    "row_selected": "rgba(107, 92, 184, 80)",
-    "tile_border": "rgba(0, 0, 0, 28)",
-    "tile_border_hov": "rgba(0, 0, 0, 70)",
-    "text": "#1a1a1f",
-    "text_sec": "#5a5a66",
-    "text_muted": "#9090a0",
-    "text_inv": "#ffffff",
-    "accent": "#6b5cb8",
-    "accent_hov": "#5a4da0",
-    "accent_press": "#4a3e8a",
-    "accent_soft": "rgba(107, 92, 184, 35)",
-    "btn_accent_hover_bg": "rgba(107, 92, 184, 55)",
-    "danger": "#d13838",
-    "danger_hov": "#b82d2d",
-    "danger_soft": "rgba(209, 56, 56, 35)",
-    "btn_danger_hover_bg": "rgba(209, 56, 56, 50)",
-    "icon_hover_bg": "rgba(0, 0, 0, 22)",
-    "danger_icon_hover_bg": "rgba(209, 56, 56, 28)",
-    "icon_hover_bg_on_selected": "rgba(255, 255, 255, 235)",
-    "danger_icon_hover_bg_on_selected": "rgba(255, 220, 220, 235)",
-    "btn_border": "rgba(0, 0, 0, 40)",
-    "input_bg": "#ffffff",
-    "input_border": "rgba(0, 0, 0, 30)",
-    "input_focus": "#6b5cb8",
-    "scroll": "rgba(0, 0, 0, 60)",
-    "scroll_hov": "rgba(0, 0, 0, 110)",
+    "name": "light", "window_bg": "#f0f0f3", "card": "#ffffff",
+    "card_border": "rgba(0,0,0,18)", "top_panel": "rgba(255,255,255,235)",
+    "tile": "rgba(255,255,255,180)", "tile_hover": "rgba(255,255,255,250)",
+    "row_hover": "rgba(0,0,0,10)", "row_selected": "rgba(107,92,184,80)",
+    "tile_border": "rgba(0,0,0,28)", "tile_border_hov": "rgba(0,0,0,70)",
+    "text": "#1a1a1f", "text_sec": "#5a5a66", "text_muted": "#9090a0",
+    "text_inv": "#ffffff", "accent": "#6b5cb8", "accent_hov": "#5a4da0",
+    "accent_press": "#4a3e8a", "accent_soft": "rgba(107,92,184,35)",
+    "btn_accent_hover_bg": "rgba(107,92,184,55)", "danger": "#d13838",
+    "danger_hov": "#b82d2d", "danger_soft": "rgba(209,56,56,35)",
+    "btn_danger_hover_bg": "rgba(209,56,56,50)", "icon_hover_bg": "rgba(0,0,0,22)",
+    "danger_icon_hover_bg": "rgba(209,56,56,28)",
+    "icon_hover_bg_on_selected": "rgba(255,255,255,235)",
+    "danger_icon_hover_bg_on_selected": "rgba(255,220,220,235)",
+    "btn_border": "rgba(0,0,0,40)", "input_bg": "#ffffff",
+    "input_border": "rgba(0,0,0,30)", "input_focus": "#6b5cb8",
+    "scroll": "rgba(0,0,0,60)", "scroll_hov": "rgba(0,0,0,110)",
 }
 
 DARK = {
-    "name": "dark",
-    "window_bg": "#121215",
-    "card": "#1a1a1f",
-    "card_border": "rgba(255, 255, 255, 22)",
-    "top_panel": "rgba(26, 26, 31, 235)",
-    "tile": "rgba(45, 45, 53, 190)",
-    "tile_hover": "rgba(60, 60, 70, 240)",
-    "row_hover": "rgba(255, 255, 255, 10)",
-    "row_selected": "rgba(255, 140, 40, 130)",
-    "tile_border": "rgba(255, 255, 255, 30)",
-    "tile_border_hov": "rgba(255, 255, 255, 90)",
-    "text": "#e8e8ed",
-    "text_sec": "#a0a0aa",
-    "text_muted": "#606068",
-    "text_inv": "#121215",
-    "accent": "#f5c842",
-    "accent_hov": "#e5b530",
-    "accent_press": "#cc9e20",
-    "accent_soft": "rgba(245, 200, 66, 45)",
-    "btn_accent_hover_bg": "rgba(245, 200, 66, 60)",
-    "danger": "#ef5350",
-    "danger_hov": "#d93a37",
-    "danger_soft": "rgba(239, 83, 80, 45)",
-    "btn_danger_hover_bg": "rgba(239, 83, 80, 55)",
-    "icon_hover_bg": "rgba(255, 255, 255, 22)",
-    "danger_icon_hover_bg": "rgba(239, 83, 80, 45)",
-    "icon_hover_bg_on_selected": "rgba(50, 50, 50, 220)",
-    "danger_icon_hover_bg_on_selected": "rgba(70, 30, 30, 220)",
-    "btn_border": "rgba(255, 255, 255, 45)",
-    "input_bg": "#1a1a1f",
-    "input_border": "rgba(255, 255, 255, 35)",
-    "input_focus": "#f5c842",
-    "scroll": "rgba(255, 255, 255, 55)",
-    "scroll_hov": "rgba(255, 255, 255, 110)",
+    "name": "dark", "window_bg": "#121215", "card": "#1a1a1f",
+    "card_border": "rgba(255,255,255,22)", "top_panel": "rgba(26,26,31,235)",
+    "tile": "rgba(45,45,53,190)", "tile_hover": "rgba(60,60,70,240)",
+    "row_hover": "rgba(255,255,255,10)", "row_selected": "rgba(255,140,40,130)",
+    "tile_border": "rgba(255,255,255,30)", "tile_border_hov": "rgba(255,255,255,90)",
+    "text": "#e8e8ed", "text_sec": "#a0a0aa", "text_muted": "#606068",
+    "text_inv": "#121215", "accent": "#f5c842", "accent_hov": "#e5b530",
+    "accent_press": "#cc9e20", "accent_soft": "rgba(245,200,66,45)",
+    "btn_accent_hover_bg": "rgba(245,200,66,60)", "danger": "#ef5350",
+    "danger_hov": "#d93a37", "danger_soft": "rgba(239,83,80,45)",
+    "btn_danger_hover_bg": "rgba(239,83,80,55)", "icon_hover_bg": "rgba(255,255,255,22)",
+    "danger_icon_hover_bg": "rgba(239,83,80,45)",
+    "icon_hover_bg_on_selected": "rgba(50,50,50,220)",
+    "danger_icon_hover_bg_on_selected": "rgba(70,30,30,220)",
+    "btn_border": "rgba(255,255,255,45)", "input_bg": "#1a1a1f",
+    "input_border": "rgba(255,255,255,35)", "input_focus": "#f5c842",
+    "scroll": "rgba(255,255,255,55)", "scroll_hov": "rgba(255,255,255,110)",
 }
-
 THEMES = {"light": LIGHT, "dark": DARK}
 
 
-def build_qss(t: dict) -> str:
+def build_qss(t_):
     return f"""
-    * {{
-        font-family: "Segoe UI", "SF Pro Text", -apple-system, "Roboto", sans-serif;
-    }}
-    QWidget {{
-        color: {t['text']};
-        background: transparent;
-        font-size: 14px;
-    }}
-    QMainWindow {{
-        background: {t['window_bg']};
-    }}
+    * {{ font-family: "Segoe UI", "SF Pro Text", -apple-system, "Roboto", sans-serif; }}
+    QWidget {{ color: {t_['text']}; background: transparent; font-size: 14px; }}
+    QMainWindow {{ background: {t_['window_bg']}; }}
     QLineEdit {{
-        background: {t['input_bg']};
-        border: 1px solid {t['input_border']};
-        border-radius: 6px;
-        padding: 8px 12px;
-        color: {t['text']};
-        font-size: 15px;
-        selection-background-color: {t['accent']};
-        selection-color: {t['text_inv']};
+        background: {t_['input_bg']}; border: 1px solid {t_['input_border']};
+        border-radius: 6px; padding: 8px 12px; color: {t_['text']};
+        font-size: 15px; selection-background-color: {t_['accent']};
+        selection-color: {t_['text_inv']};
     }}
-    QLineEdit:focus {{
-        border: 1px solid {t['input_focus']};
-    }}
+    QLineEdit:focus {{ border: 1px solid {t_['input_focus']}; }}
     QPushButton {{
+        background: transparent; border: 1px solid {t_['btn_border']};
+        border-radius: 4px; padding: 8px 18px; color: {t_['text']};
+        font-size: 15px; font-weight: 500;
+    }}
+    QPushButton:hover {{ background: {t_['btn_accent_hover_bg']};
+        border: 1px solid {t_['accent']}; color: {t_['accent']}; }}
+    QPushButton:pressed {{ background: {t_['accent']};
+        border: 1px solid {t_['accent']}; color: {t_['text_inv']}; }}
+    QPushButton:disabled {{ color: {t_['text_muted']}; background: transparent;
+        border: 1px solid {t_['card_border']}; }}
+    QPushButton#danger {{ background: transparent; border: 1px solid {t_['btn_border']};
+        color: {t_['danger']}; }}
+    QPushButton#danger:hover {{ background: {t_['btn_danger_hover_bg']};
+        border: 1px solid {t_['danger']}; color: {t_['danger']}; }}
+    QPushButton#danger:pressed {{ background: {t_['danger']};
+        border: 1px solid {t_['danger']}; color: {t_['text_inv']}; }}
+    QPushButton#danger:disabled {{ color: {t_['text_muted']}; background: transparent;
+        border: 1px solid {t_['card_border']}; }}
+    QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+    QScrollBar::handle:vertical {{ background: {t_['scroll']}; border-radius: 5px;
+        min-height: 30px; }}
+    QScrollBar::handle:vertical:hover {{ background: {t_['scroll_hov']}; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+    QTableView {{ background: transparent; border: none; outline: none;
+        gridline-color: transparent; }}
+    QTableView::item {{ border: none; padding: 0; }}
+    QHeaderView::section {{ background: transparent; border: none;
+        color: {t_['text_muted']}; font-size: 12px; font-weight: 600;
+        padding: 10px 14px; text-align: left; letter-spacing: 0.4px; }}
+    QDialog {{ background: {t_['window_bg']}; }}
+    QMenu {{ background: {t_['card']}; color: {t_['text']};
+        border: 1px solid {t_['card_border']}; border-radius: 6px; padding: 4px; }}
+    QMenu::item {{ padding: 8px 18px; border-radius: 4px; font-size: 14px; }}
+    QMenu::item:selected {{ background: {t_['accent']}; color: {t_['text_inv']}; }}
+    QMenu::separator {{ height: 1px; background: {t_['card_border']};
+        margin: 4px 8px; }}
+    QTabWidget::pane {{ border: 1px solid {t_['card_border']};
+        border-radius: 10px; background: {t_['card']}; top: -1px; }}
+    QTabBar {{ background: transparent; qproperty-expanding: 0; }}
+    QTabBar::tab {{ background: transparent; color: {t_['text_sec']};
+        padding: 10px 22px; margin-right: 4px;
+        border: 1px solid transparent;
+        border-bottom: 2px solid transparent;
+        font-size: 14px; font-weight: 500;
+        border-top-left-radius: 8px; border-top-right-radius: 8px; }}
+    QTabBar::tab:selected {{ color: {t_['accent']};
+        border-bottom: 2px solid {t_['accent']}; }}
+    QTabBar::tab:hover {{ color: {t_['text']};
+        background: {t_['btn_accent_hover_bg']}; }}
+    QTabBar::tab:disabled {{ color: {t_['text_muted']}; }}
+    QFrame#settingsCard {{
+        background: {t_['card']};
+        border: 1px solid {t_['card_border']};
+        border-radius: 10px;
+    }}
+    QLabel#settingsCardTitle {{
+        font-size: 11px;
+        font-weight: 700;
+        color: {t_['text_muted']};
+        letter-spacing: 1.5px;
         background: transparent;
-        border: 1px solid {t['btn_border']};
-        border-radius: 4px;
-        padding: 8px 18px;
-        color: {t['text']};
-        font-size: 15px;
-        font-weight: 500;
     }}
-    QPushButton:hover {{
-        background: {t['btn_accent_hover_bg']};
-        border: 1px solid {t['accent']};
-        color: {t['accent']};
-    }}
-    QPushButton:pressed {{
-        background: {t['accent']};
-        border: 1px solid {t['accent']};
-        color: {t['text_inv']};
-    }}
-    QPushButton:disabled {{
-        color: {t['text_muted']};
-        background: transparent;
-        border: 1px solid {t['card_border']};
-    }}
-    QPushButton#danger {{
-        background: transparent;
-        border: 1px solid {t['btn_border']};
-        color: {t['danger']};
-    }}
-    QPushButton#danger:hover {{
-        background: {t['btn_danger_hover_bg']};
-        border: 1px solid {t['danger']};
-        color: {t['danger']};
-    }}
-    QPushButton#danger:pressed {{
-        background: {t['danger']};
-        border: 1px solid {t['danger']};
-        color: {t['text_inv']};
-    }}
-    QPushButton#danger:disabled {{
-        color: {t['text_muted']};
-        background: transparent;
-        border: 1px solid {t['card_border']};
-    }}
-    QScrollBar:vertical {{
-        background: transparent;
-        width: 10px;
-        margin: 2px;
-    }}
-    QScrollBar::handle:vertical {{
-        background: {t['scroll']};
-        border-radius: 5px;
-        min-height: 30px;
-    }}
-    QScrollBar::handle:vertical:hover {{
-        background: {t['scroll_hov']};
-    }}
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-        height: 0;
-    }}
-    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-        background: transparent;
-    }}
-    QTableView {{
-        background: transparent;
-        border: none;
-        outline: none;
-        gridline-color: transparent;
-    }}
-    QTableView::item {{
-        border: none;
-        padding: 0;
-    }}
-    QHeaderView::section {{
-        background: transparent;
-        border: none;
-        color: {t['text_muted']};
-        font-size: 12px;
-        font-weight: 600;
-        padding: 10px 14px;
-        text-align: left;
-        letter-spacing: 0.4px;
-    }}
-    QDialog {{
-        background: {t['window_bg']};
-    }}
-    QMenu {{
-        background: {t['card']};
-        color: {t['text']};
-        border: 1px solid {t['card_border']};
-        border-radius: 6px;
-        padding: 4px;
-    }}
-    QMenu::item {{
-        padding: 8px 18px;
-        border-radius: 4px;
-        font-size: 14px;
-    }}
-    QMenu::item:selected {{
-        background: {t['accent']};
-        color: {t['text_inv']};
-    }}
-    QMenu::separator {{
-        height: 1px;
-        background: {t['card_border']};
-        margin: 4px 8px;
+    QPlainTextEdit {{
+        background: {t_['input_bg']}; border: 1px solid {t_['input_border']};
+        border-radius: 6px; color: {t_['text_sec']}; font-size: 11px;
+        font-family: "Consolas", "Monaco", monospace; padding: 6px;
     }}
     """
 
 
-def primary_btn_qss(t: dict) -> str:
+def primary_btn_qss(t_):
     return f"""
     QPushButton {{
-        background-color: {t['accent']};
-        border: 1px solid {t['accent']};
-        border-radius: 6px;
-        color: {t['text_inv']};
-        font-size: 15px;
-        font-weight: 600;
-        padding: 10px 22px;
+        background-color: {t_['accent']}; border: 1px solid {t_['accent']};
+        border-radius: 6px; color: {t_['text_inv']}; font-size: 15px;
+        font-weight: 600; padding: 10px 22px;
     }}
-    QPushButton:hover {{
-        background-color: {t['accent_hov']};
-        border-color: {t['accent_hov']};
-    }}
-    QPushButton:pressed {{
-        background-color: {t['accent_press']};
-        border-color: {t['accent_press']};
-    }}
-    QPushButton:disabled {{
-        background-color: transparent;
-        color: {t['text_muted']};
-        border: 1px solid {t['card_border']};
-    }}
+    QPushButton:hover {{ background-color: {t_['accent_hov']};
+        border-color: {t_['accent_hov']}; }}
+    QPushButton:pressed {{ background-color: {t_['accent_press']};
+        border-color: {t_['accent_press']}; }}
+    QPushButton:disabled {{ background-color: transparent;
+        color: {t_['text_muted']}; border: 1px solid {t_['card_border']}; }}
     """
 
 
-def danger_btn_qss(t: dict) -> str:
+def danger_btn_qss(t_):
     return f"""
     QPushButton {{
-        background-color: {t['danger']};
-        border: 1px solid {t['danger']};
-        border-radius: 6px;
-        color: #ffffff;
-        font-size: 15px;
-        font-weight: 600;
-        padding: 10px 22px;
+        background-color: {t_['danger']}; border: 1px solid {t_['danger']};
+        border-radius: 6px; color: #ffffff; font-size: 15px;
+        font-weight: 600; padding: 10px 22px;
     }}
-    QPushButton:hover {{
-        background-color: {t['danger_hov']};
-        border-color: {t['danger_hov']};
-    }}
+    QPushButton:hover {{ background-color: {t_['danger_hov']};
+        border-color: {t_['danger_hov']}; }}
     """
 
 
@@ -816,7 +716,7 @@ class ThemeManager:
             try:
                 app.setStyleSheet(build_qss(self.t))
             except Exception as e:
-                print(f"[theme] setStyleSheet error: {e}")
+                print(f"[theme] {e}")
         if notify:
             for cb in list(self._listeners):
                 try:
@@ -824,9 +724,9 @@ class ThemeManager:
                 except RuntimeError:
                     pass
                 except Exception as e:
-                    print(f"[theme] callback error: {e}")
+                    print(f"[theme] cb: {e}")
 
-    def set_mode(self, mode: str, save: bool = True):
+    def set_mode(self, mode, save=True):
         if mode not in ("system", "light", "dark"):
             mode = "system"
         self.mode = mode
@@ -835,10 +735,9 @@ class ThemeManager:
             settings.set("theme", mode)
 
     def toggle(self):
-        new_mode = "dark" if self.name == "light" else "light"
-        self.set_mode(new_mode)
+        self.set_mode("dark" if self.name == "light" else "light")
 
-    def on_system_color_scheme_changed(self, _scheme):
+    def on_system_color_scheme_changed(self, _):
         if self.mode == "system":
             self._apply_mode(notify=True)
 
@@ -856,7 +755,7 @@ theme = ThemeManager()
 class RecordModel(QAbstractTableModel):
     _COLUMN_KEYS = ["col_service", "col_login", "col_password", "col_description", ""]
 
-    def __init__(self, storage: nimbus.Storage):
+    def __init__(self, storage):
         super().__init__()
         self.storage = storage
         self._data = list(storage.get_all())
@@ -865,14 +764,12 @@ class RecordModel(QAbstractTableModel):
     def refresh(self):
         self.beginResetModel()
         self._data = list(self.storage.get_all())
-        live_ids = {id(r) for r in self._data}
-        self._revealed &= live_ids
+        live = {id(r) for r in self._data}
+        self._revealed &= live
         self.endResetModel()
 
     def refresh_headers(self):
-        self.headerDataChanged.emit(
-            Qt.Orientation.Horizontal, 0, len(self._COLUMN_KEYS) - 1
-        )
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self._COLUMN_KEYS) - 1)
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._data)
@@ -898,21 +795,18 @@ class RecordModel(QAbstractTableModel):
             return rec
         return None
 
-    def toggle_reveal(self, row: int):
+    def toggle_reveal(self, row):
         if not (0 <= row < len(self._data)):
             return
         rec = self._data[row]
         key = id(rec)
-        if key in self._revealed:
-            self._revealed.discard(key)
-        else:
-            self._revealed.add(key)
+        self._revealed.symmetric_difference_update({key})
         idx = self.index(row, 2)
         self.dataChanged.emit(idx, idx)
 
-    def get_record(self, source_row: int) -> Optional[dict]:
-        if 0 <= source_row < len(self._data):
-            return self._data[source_row]
+    def get_record(self, row):
+        if 0 <= row < len(self._data):
+            return self._data[row]
         return None
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
@@ -929,7 +823,7 @@ class RecordFilterProxy(QSortFilterProxyModel):
         self.setDynamicSortFilter(True)
         self._needle = ""
 
-    def set_filter_text(self, text: str):
+    def set_filter_text(self, text):
         self._needle = text.strip().lower()
         self.invalidateFilter()
 
@@ -946,7 +840,7 @@ class RecordFilterProxy(QSortFilterProxyModel):
 
 
 # ---------------------------------------------------------------------------
-# Таблица + делегат
+# Таблица и делегат
 # ---------------------------------------------------------------------------
 
 class HoverTableView(QTableView):
@@ -957,11 +851,10 @@ class HoverTableView(QTableView):
         self._hover_col = -1
         self._hover_btn = -1
 
-    def mouseMoveEvent(self, event: QMouseEvent):
+    def mouseMoveEvent(self, event):
         index = self.indexAt(event.pos())
         row = index.row() if index.isValid() else -1
         col = index.column() if index.isValid() else -1
-
         hover_btn = -1
         if index.isValid() and col == 4:
             rect = self.visualRect(index)
@@ -973,11 +866,9 @@ class HoverTableView(QTableView):
                 hover_btn = 0
             elif QRect(sx + btn + gap, y, btn, btn).contains(event.pos()):
                 hover_btn = 1
-
         changed = False
         if row != self._hover_row or col != self._hover_col:
-            self._hover_row = row
-            self._hover_col = col
+            self._hover_row, self._hover_col = row, col
             changed = True
         if hover_btn != self._hover_btn:
             self._hover_btn = hover_btn
@@ -1003,24 +894,21 @@ class HoverTableView(QTableView):
 
 
 class TileDelegate(QStyledItemDelegate):
-    def __init__(self, view: HoverTableView, is_action_column: bool = False,
-                 on_action=None):
+    def __init__(self, view, is_action_column=False, on_action=None):
         super().__init__(view)
         self.view = view
         self.is_action_column = is_action_column
         self.on_action = on_action
 
-    def paint(self, painter: QPainter, option, index):
+    def paint(self, painter, option, index):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         t_ = theme.current()
-
         row = index.row()
         col = index.column()
         row_hovered = (row == self.view.hover_row)
         tile_hovered = row_hovered and (col == self.view.hover_col)
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
-
         if is_selected:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(qc(t_["row_selected"]))
@@ -1029,98 +917,72 @@ class TileDelegate(QStyledItemDelegate):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(qc(t_["row_hover"]))
             painter.drawRect(option.rect)
-
         if self.is_action_column:
             self._paint_actions(painter, option, row, is_selected)
         else:
             self._paint_tile(painter, option, index, tile_hovered)
-
         painter.restore()
 
     def _paint_tile(self, painter, option, index, hovered):
         t_ = theme.current()
-
         if hovered:
             rect = option.rect.adjusted(3, 4, -3, -4)
-            bg = qc(t_["tile_hover"])
-            border = qc(t_["tile_border_hov"])
+            bg, border = qc(t_["tile_hover"]), qc(t_["tile_border_hov"])
             painter.setPen(Qt.PenStyle.NoPen)
-            if t_["name"] == "light":
-                painter.setBrush(QColor(0, 0, 0, 20))
-            else:
-                painter.setBrush(QColor(0, 0, 0, 85))
-            shadow = rect.adjusted(0, 2, 0, 2)
-            painter.drawRoundedRect(shadow, 5, 5)
+            painter.setBrush(QColor(0, 0, 0, 20 if t_["name"] == "light" else 85))
+            painter.drawRoundedRect(rect.adjusted(0, 2, 0, 2), 5, 5)
         else:
             rect = option.rect.adjusted(4, 5, -4, -5)
-            bg = qc(t_["tile"])
-            border = qc(t_["tile_border"])
-
+            bg, border = qc(t_["tile"]), qc(t_["tile_border"])
         painter.setPen(QPen(border, 1))
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, 4, 4)
-
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
         painter.setPen(qc(t_["text"]))
-        font = painter.font()
-        font.setPointSize(11)
-        font.setWeight(QFont.Weight.Normal)
-        painter.setFont(font)
-
-        text_rect = rect.adjusted(14, 0, -10, 0)
-        painter.drawText(
-            text_rect,
-            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-            text,
-        )
+        f = painter.font(); f.setPointSize(11); f.setWeight(QFont.Weight.Normal)
+        painter.setFont(f)
+        painter.drawText(rect.adjusted(14, 0, -10, 0),
+                         int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                         text)
 
     def _paint_actions(self, painter, option, row, is_selected):
         t_ = theme.current()
         rect = option.rect
-        btn = 34
-        gap = 8
+        btn, gap = 34, 8
         total = btn * 2 + gap
         sx = rect.center().x() - total // 2
         y = rect.center().y() - btn // 2
-
         edit_rect = QRect(sx, y, btn, btn)
         del_rect = QRect(sx + btn + gap, y, btn, btn)
-
-        hover_btn = self.view.hover_btn if row == self.view.hover_row else -1
-
-        if hover_btn == 0:
-            bg_key = "icon_hover_bg_on_selected" if is_selected else "icon_hover_bg"
+        hb = self.view.hover_btn if row == self.view.hover_row else -1
+        if hb == 0:
+            key = "icon_hover_bg_on_selected" if is_selected else "icon_hover_bg"
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(qc(t_[bg_key]))
+            painter.setBrush(qc(t_[key]))
             painter.drawRoundedRect(edit_rect, 5, 5)
-        painter.setPen(qc(t_["accent"] if hover_btn == 0 else t_["text_sec"]))
+        painter.setPen(qc(t_["accent"] if hb == 0 else t_["text_sec"]))
         f = painter.font(); f.setPointSize(15); f.setWeight(QFont.Weight.Bold)
         painter.setFont(f)
         painter.drawText(edit_rect, int(Qt.AlignmentFlag.AlignCenter), "✎")
-
-        if hover_btn == 1:
-            bg_key = ("danger_icon_hover_bg_on_selected" if is_selected
-                      else "danger_icon_hover_bg")
+        if hb == 1:
+            key = "danger_icon_hover_bg_on_selected" if is_selected else "danger_icon_hover_bg"
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(qc(t_[bg_key]))
+            painter.setBrush(qc(t_[key]))
             painter.drawRoundedRect(del_rect, 5, 5)
-        painter.setPen(qc(t_["danger"] if hover_btn == 1 else t_["text_sec"]))
+        painter.setPen(qc(t_["danger"] if hb == 1 else t_["text_sec"]))
         painter.drawText(del_rect, int(Qt.AlignmentFlag.AlignCenter), "✕")
 
     def editorEvent(self, event, model, option, index):
         if self.is_action_column and event.type() == event.Type.MouseButtonRelease:
             rect = option.rect
-            btn = 34
-            gap = 8
+            btn, gap = 34, 8
             total = btn * 2 + gap
             sx = rect.center().x() - total // 2
             y = rect.center().y() - btn // 2
-            edit_rect = QRect(sx, y, btn, btn)
-            del_rect = QRect(sx + btn + gap, y, btn, btn)
-            if edit_rect.contains(event.pos()):
+            if QRect(sx, y, btn, btn).contains(event.pos()):
                 if self.on_action: self.on_action("edit", index)
                 return True
-            if del_rect.contains(event.pos()):
+            if QRect(sx + btn + gap, y, btn, btn).contains(event.pos()):
                 if self.on_action: self.on_action("delete", index)
                 return True
         return super().editorEvent(event, model, option, index)
@@ -1130,22 +992,20 @@ class TileDelegate(QStyledItemDelegate):
 
 
 # ---------------------------------------------------------------------------
-# UI-компоненты
+# UI-элементы
 # ---------------------------------------------------------------------------
 
 class ThemeSwitch(QWidget):
-    W = 52
-    H = 28
-    PAD = 3
+    W, H, PAD = 52, 28, 3
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(self.W, self.H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._pos = 0.0 if theme.name == "light" else 1.0
-        theme.subscribe(self._on_theme_change)
+        theme.subscribe(self._on_change)
 
-    def _on_theme_change(self, _t):
+    def _on_change(self, _):
         self._pos = 0.0 if theme.name == "light" else 1.0
         try:
             self.update()
@@ -1160,14 +1020,11 @@ class ThemeSwitch(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         t_ = theme.current()
-
         rect = QRectF(1, 1, self.W - 2, self.H - 2)
         radius = rect.height() / 2
-
         p.setPen(QPen(qc(t_["tile_border"]), 1))
         p.setBrush(qc(t_["tile"]))
         p.drawRoundedRect(rect, radius, radius)
-
         d = rect.height() - 2 * self.PAD
         x = rect.left() + self.PAD + (rect.width() - 2 * self.PAD - d) * self._pos
         y = rect.top() + self.PAD
@@ -1178,30 +1035,27 @@ class ThemeSwitch(QWidget):
 
 class ToggleSwitch(QWidget):
     toggled = pyqtSignal(bool)
+    W, H, PAD = 46, 24, 3
 
-    W = 46
-    H = 24
-    PAD = 3
-
-    def __init__(self, checked: bool = False, parent=None):
+    def __init__(self, checked=False, parent=None):
         super().__init__(parent)
         self.setFixedSize(self.W, self.H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._checked = bool(checked)
         self._pos = 1.0 if self._checked else 0.0
         self._anim_timer = None
-        theme.subscribe(self._on_theme_change)
+        theme.subscribe(self._on_change)
 
-    def _on_theme_change(self, _t):
+    def _on_change(self, _):
         try:
             self.update()
         except RuntimeError:
             pass
 
-    def isChecked(self) -> bool:
+    def isChecked(self):
         return self._checked
 
-    def setChecked(self, value: bool):
+    def setChecked(self, value):
         value = bool(value)
         if value == self._checked:
             return
@@ -1211,9 +1065,7 @@ class ToggleSwitch(QWidget):
 
     def _animate(self):
         target = 1.0 if self._checked else 0.0
-        self._start = self._pos
-        self._target = target
-        self._step = 0
+        self._start, self._target, self._step = self._pos, target, 0
         if self._anim_timer is None:
             self._anim_timer = QTimer()
             self._anim_timer.timeout.connect(self._tick)
@@ -1236,26 +1088,19 @@ class ToggleSwitch(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         t_ = theme.current()
-
         if not self.isEnabled():
             p.setOpacity(0.35)
-
         rect = QRectF(1, 1, self.W - 2, self.H - 2)
         radius = rect.height() / 2
-
         bg = qc(t_["accent"]) if self._checked else qc(t_["tile"])
         p.setPen(QPen(qc(t_["tile_border"]), 1))
         p.setBrush(bg)
         p.drawRoundedRect(rect, radius, radius)
-
         d = rect.height() - 2 * self.PAD
         x = rect.left() + self.PAD + (rect.width() - 2 * self.PAD - d) * self._pos
         y = rect.top() + self.PAD
         p.setPen(Qt.PenStyle.NoPen)
-        if self._checked:
-            p.setBrush(QColor("white"))
-        else:
-            p.setBrush(qc(t_["text_muted"]))
+        p.setBrush(QColor("white") if self._checked else qc(t_["text_muted"]))
         p.drawEllipse(QRectF(x, y, d, d))
 
 
@@ -1266,15 +1111,12 @@ class SegmentedControl(QWidget):
         super().__init__(parent)
         self._option_keys = [k for k, _ in option_keys]
         self._values = [v for _, v in option_keys]
-
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons = []
-
         n = len(option_keys)
         for i, (key, value) in enumerate(option_keys):
             btn = QPushButton(t(key))
@@ -1294,12 +1136,10 @@ class SegmentedControl(QWidget):
             layout.addWidget(btn)
             if value == current_value:
                 btn.setChecked(True)
-            theme.subscribe(lambda _t, b=btn: self._apply_btn_style(b))
-
+            theme.subscribe(lambda _, b=btn: self._apply_btn_style(b))
         self._group.buttonClicked.connect(self._on_click)
         for b in self._buttons:
             self._apply_btn_style(b)
-
         i18n.subscribe(self._retranslate)
 
     def _retranslate(self):
@@ -1312,45 +1152,26 @@ class SegmentedControl(QWidget):
     def _apply_btn_style(self, btn):
         t_ = theme.current()
         pos = btn.property("seg_pos")
-
         if pos == "first":
-            corners = (
-                "border-top-left-radius: 6px; border-bottom-left-radius: 6px;"
-                "border-top-right-radius: 0; border-bottom-right-radius: 0;"
-                "border-right: 0;"
-            )
+            corners = ("border-top-left-radius: 6px; border-bottom-left-radius: 6px;"
+                       "border-top-right-radius: 0; border-bottom-right-radius: 0;"
+                       "border-right: 0;")
         elif pos == "last":
-            corners = (
-                "border-top-right-radius: 6px; border-bottom-right-radius: 6px;"
-                "border-top-left-radius: 0; border-bottom-left-radius: 0;"
-            )
+            corners = ("border-top-right-radius: 6px; border-bottom-right-radius: 6px;"
+                       "border-top-left-radius: 0; border-bottom-left-radius: 0;")
         else:
             corners = "border-radius: 0; border-right: 0;"
-
         if btn.isChecked():
-            bg = t_["accent"]
-            fg = t_["text_inv"]
-            border = t_["accent"]
-            hover = t_["accent_hov"]
+            bg, fg, border, hover = t_["accent"], t_["text_inv"], t_["accent"], t_["accent_hov"]
         else:
-            bg = t_["input_bg"]
-            fg = t_["text"]
-            border = t_["input_border"]
-            hover = t_["btn_accent_hover_bg"]
-
+            bg, fg, border, hover = (t_["input_bg"], t_["text"], t_["input_border"],
+                                     t_["btn_accent_hover_bg"])
         btn.setStyleSheet(f"""
             QPushButton {{
-                background: {bg};
-                color: {fg};
-                border: 1px solid {border};
-                {corners}
-                padding: 8px 16px;
-                font-size: 14px;
-                font-weight: 500;
+                background: {bg}; color: {fg}; border: 1px solid {border};
+                {corners} padding: 8px 16px; font-size: 14px; font-weight: 500;
             }}
-            QPushButton:hover {{
-                background: {hover};
-            }}
+            QPushButton:hover {{ background: {hover}; }}
         """)
 
     def _on_click(self, btn):
@@ -1365,6 +1186,151 @@ class SegmentedControl(QWidget):
         return self._values[idx] if idx >= 0 else None
 
 
+class SyncIndicator(QWidget):
+    STATE_OFF, STATE_SYNCING, STATE_OK, STATE_ERROR = "off", "syncing", "ok", "error"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(160, 38)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._state = self.STATE_OFF
+        self._last_sync_time = None
+        self._err_text = ""
+        self._blink_phase = 0
+        self._dots_phase = 1
+        self._blink_timer = QTimer(self)
+        self._blink_timer.timeout.connect(self._tick_blink)
+        self._dots_timer = QTimer(self)
+        self._dots_timer.timeout.connect(self._tick_dots)
+        theme.subscribe(lambda _: self._safe_update())
+        i18n.subscribe(lambda: self._safe_update())
+
+    def set_state(self, state, last_sync_time=None, err_text=None):
+        self._state = state
+        if last_sync_time is not None:
+            self._last_sync_time = last_sync_time
+        if err_text is not None:
+            self._err_text = err_text or ""
+
+        if state in (self.STATE_OK, self.STATE_ERROR):
+            if not self._blink_timer.isActive():
+                self._blink_timer.start(750)
+        else:
+            self._blink_timer.stop()
+            self._blink_phase = 0
+
+        if state == self.STATE_SYNCING:
+            self._dots_phase = 1
+            if not self._dots_timer.isActive():
+                self._dots_timer.start(250)
+        else:
+            self._dots_timer.stop()
+            self._dots_phase = 1
+
+        try:
+            if state == self.STATE_OK:
+                if self._last_sync_time:
+                    full = time.strftime("%Y-%m-%d %H:%M:%S",
+                                         time.localtime(self._last_sync_time))
+                    self.setToolTip(f"Synced {full}")
+                else:
+                    self.setToolTip("Synced")
+            elif state == self.STATE_ERROR:
+                tip = "Sync error"
+                if self._err_text:
+                    tip += f"\n{self._err_text}"
+                self.setToolTip(tip)
+            elif state == self.STATE_SYNCING:
+                self.setToolTip("Syncing…")
+            else:
+                self.setToolTip("Sync disabled")
+        except Exception:
+            pass
+
+        self._safe_update()
+
+    def get_state(self):
+        return self._state
+
+    def _tick_blink(self):
+        self._blink_phase = 1 - self._blink_phase
+        self._safe_update()
+
+    def _tick_dots(self):
+        self._dots_phase = (self._dots_phase % 2) + 1
+        self._safe_update()
+
+    def _safe_update(self):
+        try:
+            self.update()
+        except RuntimeError:
+            pass
+
+    def _colors(self):
+        if theme.name == "dark":
+            return {"ok": QColor("#22c55e"), "error": QColor("#ef4444"),
+                    "syncing": QColor("#eab308"), "off": QColor("#4b5563"),
+                    "text": QColor("#9ca3af")}
+        return {"ok": QColor("#16a34a"), "error": QColor("#dc2626"),
+                "syncing": QColor("#ca8a04"), "off": QColor("#6b7280"),
+                "text": QColor("#4b5563")}
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        c = self._colors()
+
+        if self._state == self.STATE_OK:
+            dot = c["ok"]
+            text = self._fmt_time(self._last_sync_time)
+        elif self._state == self.STATE_ERROR:
+            dot = c["error"]
+            text = t("sync_ind_error")
+        elif self._state == self.STATE_SYNCING:
+            dot = c["syncing"]
+            sync_phase = ['/','\\']
+            text =  sync_phase[self._dots_phase-1] + '  ' + t("sync_ind_syncing")
+        else:
+            dot = c["off"]
+            text = t("sync_ind_off")
+
+        if self._state in (self.STATE_OK, self.STATE_ERROR):
+            alpha = 255 if self._blink_phase == 0 else 150
+        else:
+            alpha = 255
+        dc = QColor(dot)
+        dc.setAlpha(alpha)
+
+        r, right_pad = 5, 10
+        cx = self.width() - right_pad - r
+        cy = self.height() // 2
+
+        p.setPen(c["text"])
+        f = p.font()
+        f.setPointSize(10)
+        p.setFont(f)
+        fm = p.fontMetrics()
+
+        gap = 16
+        avail = max(0, cx - r - gap - 4)
+        shown = fm.elidedText(text, Qt.TextElideMode.ElideRight, avail)
+
+        tbr = fm.tightBoundingRect(shown)
+        baseline_y = cy - tbr.center().y()
+
+        text_x = cx - r - gap - fm.horizontalAdvance(shown)
+        p.drawText(text_x, baseline_y, shown)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(dc)
+        p.drawEllipse(cx - r, cy - r, r * 2, r * 2)
+
+    def _fmt_time(self, ts):
+        if not ts:
+            return "—"
+        return time.strftime("%H:%M", time.localtime(ts))
+
+
 class PasswordEdit(QLineEdit):
     submitted = pyqtSignal(str)
 
@@ -1374,37 +1340,27 @@ class PasswordEdit(QLineEdit):
         self.setMinimumHeight(44)
         self.setMaximumHeight(44)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setPlaceholderText("")
         self.returnPressed.connect(lambda: self.submitted.emit(self.text()))
-        theme.subscribe(self._on_theme_change)
+        theme.subscribe(lambda _: self._restyle())
         self._restyle()
 
-    def _on_theme_change(self, _t):
+    def _restyle(self):
         try:
-            self._restyle()
+            t_ = theme.current()
+            self.setStyleSheet(f"""
+                QLineEdit {{
+                    background: {t_['input_bg']}; border: 1px solid {t_['input_border']};
+                    border-radius: 6px; padding: 0; color: {t_['text']};
+                    font-size: 16px; letter-spacing: 6px;
+                }}
+                QLineEdit:focus {{ border: 1px solid {t_['input_focus']}; }}
+            """)
         except RuntimeError:
             pass
 
-    def _restyle(self):
-        t_ = theme.current()
-        self.setStyleSheet(f"""
-            QLineEdit {{
-                background: {t_['input_bg']};
-                border: 1px solid {t_['input_border']};
-                border-radius: 6px;
-                padding: 0;
-                color: {t_['text']};
-                font-size: 16px;
-                letter-spacing: 6px;
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {t_['input_focus']};
-            }}
-        """)
-
 
 # ---------------------------------------------------------------------------
-# Экран входа (вход только по паролю)
+# Login screen
 # ---------------------------------------------------------------------------
 
 class LoginView(QWidget):
@@ -1421,62 +1377,54 @@ class LoginView(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(0)
-
-        # Верхняя панель
         top_bar = QHBoxLayout()
         top_bar.setSpacing(8)
-
         self.switch = ThemeSwitch(self)
         top_bar.addWidget(self.switch, alignment=Qt.AlignmentFlag.AlignVCenter)
         top_bar.addStretch(1)
-
         self.add_user_btn = QPushButton("＋")
         self.add_user_btn.setFixedSize(38, 38)
         self.add_user_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_user_btn.clicked.connect(self._on_add_user)
         top_bar.addWidget(self.add_user_btn)
-
         outer.addLayout(top_bar)
         outer.addStretch(1)
 
-        # Центральный контент
         container = QWidget()
-        container.setFixedWidth(400)
+        container.setFixedWidth(440)
         layout = QVBoxLayout(container)
         layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
-
         self.title = QLabel("Nimbus")
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title)
-
         layout.addSpacing(20)
 
         self.pw_edit = PasswordEdit()
         self.pw_edit.submitted.connect(self._on_submit)
         layout.addWidget(self.pw_edit)
-
         layout.addSpacing(8)
 
         self.status = QLabel("")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setMinimumHeight(18)
+        self.status.setWordWrap(True)
+        self.status.setMinimumHeight(20)
+        self.status.setMaximumHeight(80)
         layout.addWidget(self.status)
 
         outer.addWidget(container, alignment=Qt.AlignmentFlag.AlignCenter)
         outer.addStretch(1)
-
-        theme.subscribe(self._on_theme_change)
-        i18n.subscribe(self._on_language_change)
+        theme.subscribe(lambda _: self._restyle())
+        i18n.subscribe(lambda: self._on_lang_change())
         self._restyle()
 
-    def show_text(self, text: str, color: Optional[str] = None):
+    def show_text(self, text, color=None):
         self._status_key = None
         self._status_text = text
         self._status_color = color or theme.current()["text_muted"]
         self._apply_status(text, self._status_color)
 
-    def show_info(self, key: str):
+    def show_info(self, key):
         self._set_status_key(key, theme.current()["accent"])
 
     def reset(self):
@@ -1488,13 +1436,7 @@ class LoginView(QWidget):
         self._status_text = None
         self._apply_status("", theme.current()["text_muted"])
 
-    def _on_theme_change(self, _t):
-        try:
-            self._restyle()
-        except RuntimeError:
-            pass
-
-    def _on_language_change(self):
+    def _on_lang_change(self):
         try:
             self._restyle()
             self._reapply_status()
@@ -1502,32 +1444,27 @@ class LoginView(QWidget):
             pass
 
     def _restyle(self):
-        t_ = theme.current()
-        self.title.setStyleSheet(f"""
-            font-size: 44px; font-weight: 700;
-            color: {t_['accent']}; letter-spacing: -1.5px;
-            background: transparent;
-        """)
-        self.status.setStyleSheet(f"""
-            font-size: 13px; color: {t_['text_muted']};
-            background: transparent;
-        """)
-        self.add_user_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent;
-                border: 1px solid {t_['btn_border']};
-                border-radius: 6px;
-                color: {t_['text_sec']};
-                font-size: 20px;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                background: {t_['btn_accent_hover_bg']};
-                border: 1px solid {t_['accent']};
-                color: {t_['accent']};
-            }}
-        """)
-        self.add_user_btn.setToolTip(t("btn_new_user_tip"))
+        try:
+            t_ = theme.current()
+            self.title.setStyleSheet(
+                f"font-size: 44px; font-weight: 700; color: {t_['accent']}; "
+                f"letter-spacing: -1.5px; background: transparent;")
+            self.status.setStyleSheet(
+                f"font-size: 18px; color: {t_['text_muted']}; background: transparent;")
+            self.add_user_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; border: 1px solid {t_['btn_border']};
+                    border-radius: 6px; color: {t_['text_sec']};
+                    font-size: 20px; padding: 0;
+                }}
+                QPushButton:hover {{
+                    background: {t_['btn_accent_hover_bg']};
+                    border: 1px solid {t_['accent']}; color: {t_['accent']};
+                }}
+            """)
+            self.add_user_btn.setToolTip(t("btn_new_user_tip"))
+        except RuntimeError:
+            pass
 
     def _reapply_status(self):
         if self._status_key:
@@ -1537,7 +1474,7 @@ class LoginView(QWidget):
         else:
             self._apply_status("", theme.current()["text_muted"])
 
-    def _set_status_key(self, key: Optional[str], color: Optional[str] = None):
+    def _set_status_key(self, key, color=None):
         self._status_key = key
         self._status_text = None
         self._status_color = color
@@ -1546,54 +1483,63 @@ class LoginView(QWidget):
         else:
             self._apply_status(t(key), color)
 
-    def _apply_status(self, text: str, color: Optional[str] = None):
-        t_ = theme.current()
-        c = color or t_["text_muted"]
-        self.status.setText(text)
-        self.status.setStyleSheet(f"""
-            font-size: 13px; color: {c};
-            background: transparent;
-        """)
+    def _apply_status(self, text, color=None):
+        try:
+            c = color or theme.current()["text_muted"]
+            self.status.setText(text)
+            self.status.setStyleSheet(
+                f"font-size: 18px; color: {c}; background: transparent;")
+        except RuntimeError:
+            pass
 
     def _on_add_user(self):
         dlg = RegisterDialog(self.window())
-        if dlg.exec() == QDialog.DialogCode.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dlg.restore_mode and dlg.github_url:
+            try:
+                username = nimbus_sync.clone_from_github(
+                    dlg.github_url, _SCRIPT_DIR, token=dlg.github_token or None)
+            except Exception as e:
+                self.show_text(t("status_sync_err", e=e), theme.current()["danger"])
+                return
+            paths = nimbus.UserPaths(username)
+            s = load_settings(paths.settings_file)
+            s["github_url"] = dlg.github_url
+            s["github_enabled"] = True
+            s["github_branch"] = "main"
+            if dlg.github_token:
+                s["github_token"] = dlg.github_token
+            save_settings(paths.settings_file, s)
+            self.show_text(t("restore_ok", name=username), theme.current()["accent"])
+            return
+        if dlg.username:
             self.show_text(t("reg_ok", name=dlg.username), theme.current()["accent"])
 
-    def _on_submit(self, pw: str):
+    def _on_submit(self, pw):
         if not pw:
             self._set_status_key("login_need_pw", "#cc8844")
             return
-
         now = time.time()
         if now < self._lock_until:
             remain = max(1, int(self._lock_until - now + 0.999))
-            self._apply_status(
-                t("login_locked", n=remain), theme.current()["danger"]
-            )
+            self._apply_status(t("login_locked", n=remain), theme.current()["danger"])
             return
-
         users = nimbus.list_existing_users()
         if not users:
-            self._set_status_key("reg_first_required",
-                                 theme.current()["danger"])
+            self._set_status_key("reg_first_required", theme.current()["danger"])
             return
-
         matched_paths = None
         matched_salt = None
-
-        # Перебираем всех пользователей и ищем совпадение пароля
         for u in users:
             paths = nimbus.UserPaths(u)
             try:
                 salt = nimbus.load_or_create_salt(paths.salt_file)
                 if nimbus.verify_master_password(pw, salt, paths.key_file):
-                    matched_paths = paths
-                    matched_salt = salt
+                    matched_paths, matched_salt = paths, salt
                     break
             except Exception:
                 continue
-
         if not matched_paths:
             self._attempts += 1
             self.pw_edit.clear()
@@ -1601,17 +1547,14 @@ class LoginView(QWidget):
                 delay = min(2 ** (self._attempts - 2), 30)
                 self._lock_until = now + delay
                 self._lock_input(delay)
-                self._apply_status(
-                    t("login_locked", n=delay), theme.current()["danger"]
-                )
+                self._apply_status(t("login_locked", n=delay), theme.current()["danger"])
             else:
                 self._set_status_key("login_wrong", theme.current()["danger"])
             return
-
         self._attempts = 0
         self._finish(pw, matched_paths, matched_salt)
 
-    def _lock_input(self, seconds: int):
+    def _lock_input(self, seconds):
         self.pw_edit.setEnabled(False)
         QTimer.singleShot(seconds * 1000, self._unlock_input)
 
@@ -1623,12 +1566,10 @@ class LoginView(QWidget):
         except RuntimeError:
             pass
 
-    def _finish(self, master_password: str, paths: nimbus.UserPaths, salt: bytes):
+    def _finish(self, master_password, paths, salt):
         try:
             iterations = nimbus.get_kdf_iterations(paths.meta_file)
-            crypto = nimbus.EncryptionManager(
-                master_password, salt, iterations=iterations
-            )
+            crypto = nimbus.EncryptionManager(master_password, salt, iterations=iterations)
             storage = nimbus.Storage(crypto, paths.data_file)
         except SystemExit:
             self._set_status_key("login_decrypt_err", theme.current()["danger"])
@@ -1640,133 +1581,167 @@ class LoginView(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Диалог создания пользователя
+# Register dialog
 # ---------------------------------------------------------------------------
 
 class RegisterDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("title_register"))
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(580)
         self.setModal(True)
-
-        self.username: Optional[str] = None
+        self.username = None
+        self.restore_mode = False
+        self.github_url = None
+        self.github_token = None
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(14)
-        layout.setContentsMargins(36, 32, 36, 28)
-
+        layout.setSpacing(12)
+        layout.setContentsMargins(36, 28, 36, 24)
         self.title_label = QLabel(t("title_register"))
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title_label)
-        layout.addSpacing(10)
+        layout.addSpacing(6)
+        self.mode_seg = SegmentedControl(
+            [("reg_mode_new", "new"), ("reg_mode_restore", "restore")], "new")
+        self.mode_seg.value_changed.connect(self._on_mode_changed)
+        layout.addWidget(self.mode_seg, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self.lbl_username = QLabel(t("field_username"))
-        layout.addWidget(self.lbl_username)
+        self.lbl_username = QLabel(t("field_username")); layout.addWidget(self.lbl_username)
         self.username_edit = QLineEdit()
         self.username_edit.setPlaceholderText(t("ph_username"))
         self.username_edit.setMinimumHeight(42)
         layout.addWidget(self.username_edit)
 
-        self.lbl_pw = QLabel(t("field_password"))
-        layout.addWidget(self.lbl_pw)
+        self.lbl_pw = QLabel(t("field_password")); layout.addWidget(self.lbl_pw)
         self.password_edit = QLineEdit()
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_edit.setPlaceholderText(t("ph_password_new"))
         self.password_edit.setMinimumHeight(42)
         layout.addWidget(self.password_edit)
 
-        self.lbl_pw_confirm = QLabel(t("field_password_confirm"))
-        layout.addWidget(self.lbl_pw_confirm)
+        self.lbl_pw_confirm = QLabel(t("field_password_confirm")); layout.addWidget(self.lbl_pw_confirm)
         self.confirm_edit = QLineEdit()
         self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.confirm_edit.setPlaceholderText(t("ph_password_confirm"))
         self.confirm_edit.setMinimumHeight(42)
         layout.addWidget(self.confirm_edit)
 
+        self.lbl_github = QLabel(t("label_github_url")); layout.addWidget(self.lbl_github)
+        self.github_edit = QLineEdit()
+        self.github_edit.setPlaceholderText(t("ph_github_url"))
+        self.github_edit.setMinimumHeight(42)
+        layout.addWidget(self.github_edit)
+
+        self.lbl_github_token = QLabel(t("label_github_token")); layout.addWidget(self.lbl_github_token)
+        self.github_token_edit = QLineEdit()
+        self.github_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.github_token_edit.setPlaceholderText(t("ph_github_token"))
+        self.github_token_edit.setMinimumHeight(42)
+        layout.addWidget(self.github_token_edit)
+
+        self.token_hint = QLabel(t("gh_auth_help"))
+        self.token_hint.setWordWrap(True)
+        self.token_hint.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.token_hint)
+
         self.err_label = QLabel("")
         self.err_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.err_label.setVisible(False)
+        self.err_label.setWordWrap(True)
         layout.addWidget(self.err_label)
-
-        layout.addSpacing(10)
+        layout.addSpacing(6)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(14)
         btn_row.addStretch(1)
-
         self.cancel_btn = QPushButton(t("btn_cancel"))
         self.cancel_btn.setFixedSize(170, 46)
         self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_btn)
-
         self.create_btn = QPushButton(t("btn_create"))
         self.create_btn.setFixedSize(170, 46)
         self.create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.create_btn.clicked.connect(self._on_create)
         btn_row.addWidget(self.create_btn)
-
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        theme.subscribe(self._on_theme_change)
+        theme.subscribe(lambda _: self._restyle())
         i18n.subscribe(self._retranslate)
         self._restyle()
-
         self.confirm_edit.returnPressed.connect(self._on_create)
         QTimer.singleShot(0, self.username_edit.setFocus)
 
-    def _on_theme_change(self, _t):
-        try:
-            self._restyle()
-        except RuntimeError:
-            pass
+    def _on_mode_changed(self, value):
+        self.restore_mode = (value == "restore")
+        show_new = not self.restore_mode
+        for w in (self.lbl_username, self.username_edit,
+                  self.lbl_pw, self.password_edit,
+                  self.lbl_pw_confirm, self.confirm_edit):
+            w.setVisible(show_new)
+        if self.restore_mode:
+            self.setWindowTitle(t("title_restore"))
+            self.title_label.setText(t("title_restore"))
+            self.create_btn.setText(t("btn_restore"))
+        else:
+            self.setWindowTitle(t("title_register"))
+            self.title_label.setText(t("title_register"))
+            self.create_btn.setText(t("btn_create"))
+        self.adjustSize()
 
     def _retranslate(self):
         try:
-            self.setWindowTitle(t("title_register"))
-            self.title_label.setText(t("title_register"))
+            if self.restore_mode:
+                self.setWindowTitle(t("title_restore"))
+                self.title_label.setText(t("title_restore"))
+                self.create_btn.setText(t("btn_restore"))
+            else:
+                self.setWindowTitle(t("title_register"))
+                self.title_label.setText(t("title_register"))
+                self.create_btn.setText(t("btn_create"))
             self.lbl_username.setText(t("field_username"))
             self.lbl_pw.setText(t("field_password"))
             self.lbl_pw_confirm.setText(t("field_password_confirm"))
+            self.lbl_github.setText(t("label_github_url"))
+            self.lbl_github_token.setText(t("label_github_token"))
+            self.token_hint.setText(t("gh_auth_help"))
             self.username_edit.setPlaceholderText(t("ph_username"))
             self.password_edit.setPlaceholderText(t("ph_password_new"))
             self.confirm_edit.setPlaceholderText(t("ph_password_confirm"))
+            self.github_edit.setPlaceholderText(t("ph_github_url"))
+            self.github_token_edit.setPlaceholderText(t("ph_github_token"))
             self.cancel_btn.setText(t("btn_cancel"))
-            self.create_btn.setText(t("btn_create"))
         except RuntimeError:
             pass
 
     def _restyle(self):
-        t_ = theme.current()
-        self.setStyleSheet(build_qss(t_) + f"""
-            QDialog {{ background: {t_['window_bg']}; }}
-            QLabel {{
-                background: transparent;
-                color: {t_['text_sec']};
-                font-size: 13px;
-                font-weight: 500;
-            }}
-        """)
-        self.title_label.setStyleSheet(f"""
-            font-size: 22px; font-weight: 700;
-            color: {t_['text']};
-            background: transparent;
-        """)
-        self.err_label.setStyleSheet(f"""
-            font-size: 13px;
-            color: {t_['danger']};
-            background: transparent;
-            padding: 6px;
-        """)
-        self.create_btn.setStyleSheet(primary_btn_qss(t_))
+        try:
+            t_ = theme.current()
+            self.token_hint.setStyleSheet(f"""
+                            QLabel {{
+                                background: {t_['input_bg']};
+                                border: 1px solid {t_['input_border']};
+                                border-radius: 6px;
+                                color: {t_['text_sec']};
+                                font-size: 11px;
+                                font-family: "Consolas", "Monaco", monospace;
+                                padding: 6px;
+                            }}
+                        """)
+            self.setStyleSheet(build_qss(t_))
+            self.title_label.setStyleSheet(
+                f"font-size: 22px; font-weight: 700; color: {t_['text']}; background: transparent;")
+            self.err_label.setStyleSheet(
+                f"font-size: 18px; color: {t_['danger']}; background: transparent; padding: 6px;")
+            self.create_btn.setStyleSheet(primary_btn_qss(t_))
+        except RuntimeError:
+            pass
 
-    def _show_err(self, key: str = None, text: str = None):
-        if key:
-            self.err_label.setText(t(key))
-        else:
-            self.err_label.setText(text or "")
+    def _show_err(self, key=None, text=None):
+        self.err_label.setText(t(key) if key else (text or ""))
         self.err_label.setVisible(True)
 
     def _hide_err(self):
@@ -1774,50 +1749,54 @@ class RegisterDialog(QDialog):
 
     def _on_create(self):
         self._hide_err()
-
+        if self.restore_mode:
+            url = self.github_edit.text().strip()
+            token = self.github_token_edit.text().strip()
+            if not url:
+                self._show_err("reg_err_no_url"); return
+            if not url.lower().startswith("https://"):
+                self._show_err(text="URL должен начинаться с https://"); return
+            if not token:
+                self._show_err(text="Personal Access Token обязателен"); return
+            self.github_url = url
+            self.github_token = token
+            self.accept()
+            return
         username = self.username_edit.text().strip()
         pw = self.password_edit.text()
         confirm = self.confirm_edit.text()
-
         err = nimbus.validate_username(username)
         if err:
-            self._show_err(f"reg_err_{err}")
-            return
-
+            self._show_err(f"reg_err_{err}"); return
         paths = nimbus.UserPaths(username)
         if paths.exists():
-            self._show_err("reg_err_exists")
-            return
-
+            self._show_err("reg_err_exists"); return
         if len(pw) < nimbus.MIN_MASTER_PASSWORD_LEN:
-            self._show_err("login_min10")
-            return
+            self._show_err("login_min10"); return
         if pw != confirm:
-            self._show_err("login_mismatch")
-            return
-
+            self._show_err("login_mismatch"); return
         try:
             paths.ensure_dir()
-
             salt = nimbus.load_or_create_salt(paths.salt_file)
             nimbus.save_meta(paths.meta_file, nimbus.KDF_ITERATIONS_V2)
-
-            crypto = nimbus.EncryptionManager(
-                pw, salt, iterations=nimbus.KDF_ITERATIONS_V2
-            )
-            encrypted = crypto.encrypt(pw)
-            nimbus.save_key_file(paths.key_file, encrypted)
-
+            crypto = nimbus.EncryptionManager(pw, salt, iterations=nimbus.KDF_ITERATIONS_V2)
+            nimbus.save_key_file(paths.key_file, crypto.encrypt(pw))
             storage = nimbus.Storage(crypto, paths.data_file)
             storage._save()
-
             try:
+                user_settings = dict(DEFAULT_SETTINGS)
+                url = self.github_edit.text().strip()
+                if url:
+                    user_settings["github_url"] = url
+                    user_settings["github_enabled"] = True
+                    user_settings["github_branch"] = "main"
+                    token = self.github_token_edit.text().strip()
+                    if token:
+                        user_settings["github_token"] = token
                 with open(paths.settings_file, 'w', encoding='utf-8') as f:
-                    json.dump(dict(DEFAULT_SETTINGS), f,
-                              indent=2, ensure_ascii=False)
+                    json.dump(user_settings, f, indent=2, ensure_ascii=False)
             except Exception:
                 pass
-
             self.username = username
             self.accept()
         except Exception as e:
@@ -1825,11 +1804,11 @@ class RegisterDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# Диалог записи
+# RecordDialog
 # ---------------------------------------------------------------------------
 
 class RecordDialog(QDialog):
-    def __init__(self, parent, title_key: str, record: Optional[dict] = None):
+    def __init__(self, parent, title_key, record=None):
         super().__init__(parent)
         self.setWindowTitle(t(title_key))
         self.setMinimumWidth(640)
@@ -1837,11 +1816,9 @@ class RecordDialog(QDialog):
         self.record = record or {}
         self._title_key = title_key
         self._form_labels = []
-
         layout = QVBoxLayout(self)
         layout.setSpacing(18)
         layout.setContentsMargins(32, 30, 32, 26)
-
         form = QFormLayout()
         form.setSpacing(16)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -1850,16 +1827,14 @@ class RecordDialog(QDialog):
         self.service_edit = QLineEdit(self.record.get("service", ""))
         self.service_edit.setPlaceholderText(t("ph_service"))
         self.service_edit.setMinimumHeight(40)
-        lbl_service = QLabel(t("field_service"))
-        self._form_labels.append((lbl_service, "field_service"))
-        form.addRow(lbl_service, self.service_edit)
+        lbl = QLabel(t("field_service")); self._form_labels.append((lbl, "field_service"))
+        form.addRow(lbl, self.service_edit)
 
         self.username_edit = QLineEdit(self.record.get("username", ""))
         self.username_edit.setPlaceholderText(t("ph_login"))
         self.username_edit.setMinimumHeight(40)
-        lbl_login = QLabel(t("field_login"))
-        self._form_labels.append((lbl_login, "field_login"))
-        form.addRow(lbl_login, self.username_edit)
+        lbl = QLabel(t("field_login")); self._form_labels.append((lbl, "field_login"))
+        form.addRow(lbl, self.username_edit)
 
         pw_layout = QHBoxLayout()
         pw_layout.setSpacing(8)
@@ -1868,28 +1843,23 @@ class RecordDialog(QDialog):
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_edit.setMinimumHeight(40)
         pw_layout.addWidget(self.password_edit, 1)
-
         self.show_pw_btn = QPushButton(t("btn_show"))
         self.show_pw_btn.setFixedSize(110, 40)
         self.show_pw_btn.setCheckable(True)
-        self.show_pw_btn.toggled.connect(self._toggle_password_visibility)
+        self.show_pw_btn.toggled.connect(self._toggle_pw_visibility)
         pw_layout.addWidget(self.show_pw_btn)
-
         self.gen_btn = QPushButton(t("btn_generate"))
         self.gen_btn.setFixedSize(150, 40)
-        self.gen_btn.clicked.connect(self._generate_password)
+        self.gen_btn.clicked.connect(self._generate_pw)
         pw_layout.addWidget(self.gen_btn)
-
-        lbl_pw = QLabel(t("field_password"))
-        self._form_labels.append((lbl_pw, "field_password"))
-        form.addRow(lbl_pw, pw_layout)
+        lbl = QLabel(t("field_password")); self._form_labels.append((lbl, "field_password"))
+        form.addRow(lbl, pw_layout)
 
         self.desc_edit = QLineEdit(self.record.get("description", ""))
         self.desc_edit.setPlaceholderText(t("ph_description"))
         self.desc_edit.setMinimumHeight(40)
-        lbl_desc = QLabel(t("field_description"))
-        self._form_labels.append((lbl_desc, "field_description"))
-        form.addRow(lbl_desc, self.desc_edit)
+        lbl = QLabel(t("field_description")); self._form_labels.append((lbl, "field_description"))
+        form.addRow(lbl, self.desc_edit)
 
         layout.addLayout(form)
         layout.addSpacing(6)
@@ -1897,40 +1867,29 @@ class RecordDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(14)
         btn_row.addStretch(1)
-
         self.cancel_btn = QPushButton(t("btn_cancel"))
         self.cancel_btn.setFixedSize(170, 46)
         self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_btn)
-
         self.save_btn = QPushButton(t("btn_save"))
         self.save_btn.setFixedSize(170, 46)
         self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.save_btn.setStyleSheet(primary_btn_qss(theme.current()))
         self.save_btn.clicked.connect(self._validate_and_accept)
         btn_row.addWidget(self.save_btn)
-
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
-        theme.subscribe(self._on_theme_change)
+        theme.subscribe(lambda _: self._restyle())
         i18n.subscribe(self._retranslate)
         self._restyle()
-        QTimer.singleShot(0, self._clear_input_focus)
+        QTimer.singleShot(0, self._clear_focus)
 
-    def _on_theme_change(self, _t):
+    def _clear_focus(self):
         try:
-            self._restyle()
-        except RuntimeError:
-            pass
-
-    def _clear_input_focus(self):
-        try:
-            for edit in (self.service_edit, self.username_edit,
-                         self.password_edit, self.desc_edit):
-                edit.deselect()
-                edit.clearFocus()
+            for e in (self.service_edit, self.username_edit, self.password_edit, self.desc_edit):
+                e.deselect(); e.clearFocus()
             self.setFocus()
         except RuntimeError:
             pass
@@ -1940,9 +1899,7 @@ class RecordDialog(QDialog):
             self.setWindowTitle(t(self._title_key))
             for lbl, key in self._form_labels:
                 lbl.setText(t(key))
-            self.show_pw_btn.setText(
-                t("btn_hide") if self.show_pw_btn.isChecked() else t("btn_show")
-            )
+            self.show_pw_btn.setText(t("btn_hide") if self.show_pw_btn.isChecked() else t("btn_show"))
             self.gen_btn.setText(t("btn_generate"))
             self.cancel_btn.setText(t("btn_cancel"))
             self.save_btn.setText(t("btn_save"))
@@ -1954,54 +1911,42 @@ class RecordDialog(QDialog):
             pass
 
     def _restyle(self):
-        t_ = theme.current()
-        self.setStyleSheet(build_qss(t_) + f"""
-            QDialog {{ background: {t_['window_bg']}; }}
-            QLabel {{
-                background: transparent;
-                color: {t_['text_sec']};
-                font-size: 14px;
-                font-weight: 500;
-            }}
-        """)
-        self.save_btn.setStyleSheet(primary_btn_qss(t_))
+        try:
+            t_ = theme.current()
+            self.setStyleSheet(build_qss(t_))
+            self.save_btn.setStyleSheet(primary_btn_qss(t_))
+        except RuntimeError:
+            pass
 
-    def _toggle_password_visibility(self, checked: bool):
+    def _toggle_pw_visibility(self, checked):
         self.password_edit.setEchoMode(
-            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
-        )
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
         self.show_pw_btn.setText(t("btn_hide") if checked else t("btn_show"))
 
-    def _generate_password(self):
+    def _generate_pw(self):
         pw = nimbus.generate_password(settings.get("password_length", 18))
         self.password_edit.setText(pw)
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Normal)
         self.show_pw_btn.setChecked(True)
         QTimer.singleShot(3000, lambda: (
             self.password_edit.setEchoMode(QLineEdit.EchoMode.Password),
-            self.show_pw_btn.setChecked(False),
-        ))
+            self.show_pw_btn.setChecked(False)))
 
     def _validate_and_accept(self):
         if not self.service_edit.text().strip():
-            self._show_error(t("err_service_required"))
-            return
+            self._err(t("err_service_required")); return
         if not self.username_edit.text().strip():
-            self._show_error(t("err_login_required"))
-            return
+            self._err(t("err_login_required")); return
         if not self.password_edit.text().strip():
-            self._show_error(t("err_password_required"))
-            return
+            self._err(t("err_password_required")); return
         self.accept()
 
-    def _show_error(self, msg: str):
-        d = MessageDialog(
-            self, title=t("title_error"), message=msg, kind="danger",
-            confirm_text=t("btn_ok"), cancel_text=None,
-        )
+    def _err(self, msg):
+        d = MessageDialog(self, t("title_error"), msg, kind="danger",
+                          confirm_text=t("btn_ok"), cancel_text=None)
         d.exec()
 
-    def get_record(self) -> dict:
+    def get_record(self):
         return {
             "service": self.service_edit.text().strip(),
             "username": self.username_edit.text().strip(),
@@ -2011,38 +1956,26 @@ class RecordDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# Простые диалоги
+# Message / Confirm dialogs
 # ---------------------------------------------------------------------------
 
 class MessageDialog(QDialog):
-    def __init__(self, parent, title: str, message: str,
-                 kind: str = "info",
-                 confirm_text: str = "OK",
-                 cancel_text: Optional[str] = None):
+    def __init__(self, parent, title, message, kind="info", confirm_text="OK", cancel_text=None):
         super().__init__(parent)
         self.kind = kind
         self.setWindowTitle(title)
         self.setMinimumWidth(460)
         self.setModal(True)
-
         layout = QVBoxLayout(self)
         layout.setSpacing(16)
         layout.setContentsMargins(32, 28, 32, 26)
-
-        self.title_label = QLabel(title)
-        self.title_label.setWordWrap(True)
+        self.title_label = QLabel(title); self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
-
-        self.msg_label = QLabel(message)
-        self.msg_label.setWordWrap(True)
+        self.msg_label = QLabel(message); self.msg_label.setWordWrap(True)
         layout.addWidget(self.msg_label)
-
         layout.addSpacing(12)
-
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(14)
-        btn_row.addStretch(1)
-
+        btn_row.setSpacing(14); btn_row.addStretch(1)
         self.cancel_btn = None
         if cancel_text is not None:
             self.cancel_btn = QPushButton(cancel_text)
@@ -2050,121 +1983,83 @@ class MessageDialog(QDialog):
             self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self.cancel_btn.clicked.connect(self.reject)
             btn_row.addWidget(self.cancel_btn)
-
         self.confirm_btn = QPushButton(confirm_text)
         self.confirm_btn.setFixedSize(160, 44)
         self.confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.confirm_btn.clicked.connect(self.accept)
         btn_row.addWidget(self.confirm_btn)
-
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
-
-        theme.subscribe(self._on_theme_change)
+        theme.subscribe(lambda _: self._restyle())
         self._restyle()
         self.confirm_btn.setFocus()
 
-    def _on_theme_change(self, _t):
+    def _restyle(self):
         try:
-            self._restyle()
+            t_ = theme.current()
+            self.setStyleSheet(build_qss(t_))
+            self.title_label.setStyleSheet(
+                f"font-size: 20px; font-weight: 700; color: {t_['text']}; background: transparent;")
+            self.msg_label.setStyleSheet(
+                f"font-size: 14px; color: {t_['text_sec']}; background: transparent;")
+            self.confirm_btn.setStyleSheet(
+                danger_btn_qss(t_) if self.kind == "danger" else primary_btn_qss(t_))
         except RuntimeError:
             pass
 
-    def _restyle(self):
-        t_ = theme.current()
-        self.setStyleSheet(build_qss(t_) + f"""
-            QDialog {{ background: {t_['window_bg']}; }}
-            QLabel {{ background: transparent; }}
-        """)
-        self.title_label.setStyleSheet(f"""
-            font-size: 20px; font-weight: 700;
-            color: {t_['text']};
-            background: transparent;
-        """)
-        self.msg_label.setStyleSheet(f"""
-            font-size: 14px;
-            color: {t_['text_sec']};
-            background: transparent;
-        """)
-        if self.kind == "danger":
-            self.confirm_btn.setStyleSheet(danger_btn_qss(t_))
-        else:
-            self.confirm_btn.setStyleSheet(primary_btn_qss(t_))
-
 
 class ConfirmMasterDialog(QDialog):
-    def __init__(self, parent, salt: bytes, key_file: str,
-                 action_key: str = "confirm_pw_action_default"):
+    def __init__(self, parent, salt, key_file, action_key="confirm_pw_action_default"):
         super().__init__(parent)
         self.salt = salt
         self.key_file = key_file
         self._action_key = action_key
         self._err_key = None
-
         self.setWindowTitle(t("title_confirm"))
         self.setMinimumWidth(440)
         self.setModal(True)
-
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(32, 30, 32, 26)
-
         self.title_label = QLabel(t("title_confirm"))
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title_label)
-
         self.sub_label = QLabel(t("confirm_pw_sub", a=t(action_key)))
         self.sub_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.sub_label.setWordWrap(True)
         layout.addWidget(self.sub_label)
-
         layout.addSpacing(8)
-
         self.pw_edit = QLineEdit()
         self.pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.pw_edit.setPlaceholderText(t("ph_master"))
         self.pw_edit.setMinimumHeight(44)
         self.pw_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.pw_edit)
-
         self.err_label = QLabel("")
         self.err_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.err_label.setVisible(False)
         layout.addWidget(self.err_label)
-
         layout.addSpacing(8)
-
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(14)
-        btn_row.addStretch(1)
-
+        btn_row.setSpacing(14); btn_row.addStretch(1)
         self.cancel_btn = QPushButton(t("btn_cancel"))
         self.cancel_btn.setFixedSize(160, 44)
         self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_btn)
-
         self.ok_btn = QPushButton(t("btn_confirm"))
         self.ok_btn.setFixedSize(160, 44)
         self.ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.ok_btn.clicked.connect(self._verify)
         btn_row.addWidget(self.ok_btn)
-
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
-
-        theme.subscribe(self._on_theme_change)
+        theme.subscribe(lambda _: self._restyle())
         i18n.subscribe(self._retranslate)
         self._restyle()
         self.pw_edit.returnPressed.connect(self._verify)
         self.pw_edit.textChanged.connect(lambda _: self._clear_err())
         self.pw_edit.setFocus()
-
-    def _on_theme_change(self, _t):
-        try:
-            self._restyle()
-        except RuntimeError:
-            pass
 
     def _retranslate(self):
         try:
@@ -2180,47 +2075,25 @@ class ConfirmMasterDialog(QDialog):
             pass
 
     def _restyle(self):
-        t_ = theme.current()
-        self.setStyleSheet(build_qss(t_) + f"""
-            QDialog {{ background: {t_['window_bg']}; }}
-            QLabel {{ background: transparent; }}
-        """)
-        self.title_label.setStyleSheet(f"""
-            font-size: 20px; font-weight: 700;
-            color: {t_['text']};
-            background: transparent;
-        """)
-        self.sub_label.setStyleSheet(f"""
-            font-size: 14px;
-            color: {t_['text_sec']};
-            background: transparent;
-        """)
-        self.err_label.setStyleSheet(f"""
-            font-size: 13px;
-            color: {t_['danger']};
-            background: transparent;
-            padding: 4px;
-        """)
-        self.pw_edit.setStyleSheet(f"""
-            QLineEdit {{
-                background: {t_['input_bg']};
-                border: 1px solid {t_['input_border']};
-                border-radius: 6px;
-                padding: 0 14px;
-                color: {t_['text']};
-                font-size: 16px;
-                letter-spacing: 5px;
-            }}
-            QLineEdit:focus {{ border: 1px solid {t_['input_focus']}; }}
-        """)
-        self.ok_btn.setStyleSheet(primary_btn_qss(t_))
+        try:
+            t_ = theme.current()
+            self.setStyleSheet(build_qss(t_))
+            self.title_label.setStyleSheet(
+                f"font-size: 20px; font-weight: 700; color: {t_['text']}; background: transparent;")
+            self.sub_label.setStyleSheet(
+                f"font-size: 14px; color: {t_['text_sec']}; background: transparent;")
+            self.err_label.setStyleSheet(
+                f"font-size: 18px; color: {t_['danger']}; background: transparent; padding: 4px;")
+            self.ok_btn.setStyleSheet(primary_btn_qss(t_))
+        except RuntimeError:
+            pass
 
     def _clear_err(self):
         if self._err_key:
             self._err_key = None
             self.err_label.setVisible(False)
 
-    def _show_err(self, key: str):
+    def _show_err(self, key):
         self._err_key = key
         self.err_label.setText(t(key))
         self.err_label.setVisible(True)
@@ -2228,8 +2101,7 @@ class ConfirmMasterDialog(QDialog):
     def _verify(self):
         pw = self.pw_edit.text()
         if not pw:
-            self._show_err("confirm_pw_need")
-            return
+            self._show_err("confirm_pw_need"); return
         if nimbus.verify_master_password(pw, self.salt, self.key_file):
             self.accept()
         else:
@@ -2239,138 +2111,58 @@ class ConfirmMasterDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
-# Настройки
+# Settings — 3 вкладки, карточки, кнопка Test справа внизу
 # ---------------------------------------------------------------------------
 
 class SettingsDialog(QDialog):
+    _test_finished = pyqtSignal(bool, str, str, str)
+
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle(t("title_settings"))
-        self.setMinimumWidth(660)
+        self.setMinimumSize(820, 660)
         self.setModal(True)
-
         self._label_widgets = []
         self._section_widgets = []
-        self._num_edits = {}
+        self._tested_pair = None
+        self._testing = False
+        self._orig_lang = settings.get("language", "ru")
+        self._orig_theme = settings.get("theme", "system")
+
+        self._test_finished.connect(self._on_test_result)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(16)
-        layout.setContentsMargins(32, 28, 32, 24)
+        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setSpacing(18)
 
         self.title_label = QLabel(t("title_settings"))
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title_label)
-        layout.addSpacing(4)
 
-        card1, grid1 = self._make_card("section_general")
-
-        lbl = QLabel(t("label_language"))
-        self._label_widgets.append((lbl, "label_language"))
-        grid1.addWidget(lbl, 0, 0)
-
-        self.lang_seg = SegmentedControl(
-            [("seg_lang_ru", "ru"), ("seg_lang_en", "en")],
-            settings.get("language", "ru"),
-        )
-        grid1.addWidget(self.lang_seg, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        lbl = QLabel(t("label_theme"))
-        self._label_widgets.append((lbl, "label_theme"))
-        grid1.addWidget(lbl, 1, 0)
-
-        self.theme_seg = SegmentedControl(
-            [("seg_theme_system", "system"),
-             ("seg_theme_light", "light"),
-             ("seg_theme_dark", "dark")],
-            settings.get("theme", "system"),
-        )
-        grid1.addWidget(self.theme_seg, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft)
-
-        layout.addWidget(card1)
-
-        card2, grid2 = self._make_card("section_startup")
-
-        lbl = QLabel(t("label_autostart"))
-        self._label_widgets.append((lbl, "label_autostart"))
-        grid2.addWidget(lbl, 0, 0)
-
-        self.autostart_toggle = ToggleSwitch(settings.get("autostart", False))
-        self.autostart_toggle.toggled.connect(self._on_autostart_toggled)
-        grid2.addWidget(self.autostart_toggle, 0, 1,
-                        alignment=Qt.AlignmentFlag.AlignLeft)
-
-        lbl = QLabel(t("label_start_min"))
-        self._label_widgets.append((lbl, "label_start_min"))
-        grid2.addWidget(lbl, 1, 0)
-
-        self.start_min_toggle = ToggleSwitch(settings.get("start_minimized", False))
-        grid2.addWidget(self.start_min_toggle, 1, 1,
-                        alignment=Qt.AlignmentFlag.AlignLeft)
-
-        layout.addWidget(card2)
-
-        card3, grid3 = self._make_card("section_security")
-
-        NUM_W = 80
-
-        security_rows = [
-            ("password_length", "label_pw_len",
-             settings.get("password_length", 18), 8, 128),
-            ("clipboard_timeout", "label_clip_timeout",
-             settings.get("clipboard_timeout", 30), 5, 600),
-            ("session_timeout", "label_session_timeout",
-             settings.get("session_timeout", 300), 30, 7200),
-        ]
-        for i, (key, label_key, value, min_v, max_v) in enumerate(security_rows):
-            lbl = QLabel(t(label_key))
-            self._label_widgets.append((lbl, label_key))
-            grid3.addWidget(lbl, i, 0)
-            edit = QLineEdit(str(value))
-            edit.setValidator(QIntValidator(min_v, max_v, self))
-            edit.setFixedWidth(NUM_W)
-            edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            edit.setMinimumHeight(40)
-            grid3.addWidget(edit, i, 1, alignment=Qt.AlignmentFlag.AlignLeft)
-            self._num_edits[key] = edit
-
-        lbl = QLabel(t("label_confirm_delete"))
-        self._label_widgets.append((lbl, "label_confirm_delete"))
-        grid3.addWidget(lbl, 3, 0)
-        self.confirm_delete_toggle = ToggleSwitch(settings.get("confirm_delete", True))
-        grid3.addWidget(
-            self._toggle_centered(self.confirm_delete_toggle, NUM_W),
-            3, 1, alignment=Qt.AlignmentFlag.AlignLeft,
-        )
-
-        lbl = QLabel(t("label_minimize_tray"))
-        self._label_widgets.append((lbl, "label_minimize_tray"))
-        grid3.addWidget(lbl, 4, 0)
-        self.minimize_tray_toggle = ToggleSwitch(settings.get("minimize_to_tray", True))
-        grid3.addWidget(
-            self._toggle_centered(self.minimize_tray_toggle, NUM_W),
-            4, 1, alignment=Qt.AlignmentFlag.AlignLeft,
-        )
-
-        layout.addWidget(card3)
-        layout.addStretch(1)
-        layout.addSpacing(6)
+        self.tabs = QTabWidget()
+        try:
+            self.tabs.tabBar().setExpanding(False)
+        except Exception:
+            pass
+        self.tabs.addTab(self._build_general_tab(), t("tab_general"))
+        self.tabs.addTab(self._build_security_tab(), t("tab_security"))
+        self.tabs.addTab(self._build_github_tab(), t("tab_github"))
+        layout.addWidget(self.tabs, 1)
+        self.lang_seg.value_changed.connect(self._on_preview_language)
+        self.theme_seg.value_changed.connect(self._on_preview_theme)
 
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(14)
-        btn_row.addStretch(1)
-
+        btn_row.setSpacing(14); btn_row.addStretch(1)
         self.cancel_btn = QPushButton(t("btn_cancel"))
         self.cancel_btn.setFixedSize(160, 44)
         self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_btn)
-
         self.save_btn = QPushButton(t("btn_save"))
         self.save_btn.setFixedSize(160, 44)
         self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.save_btn.clicked.connect(self._save)
         btn_row.addWidget(self.save_btn)
-
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
@@ -2378,13 +2170,20 @@ class SettingsDialog(QDialog):
         if actual != settings.get("autostart"):
             settings.set("autostart", actual)
             self.autostart_toggle.setChecked(actual)
-        self._on_autostart_toggled(self.autostart_toggle.isChecked())
+        self._on_autostart_toggle(self.autostart_toggle.isChecked())
 
-        theme.subscribe(self._on_theme_change)
+        theme.subscribe(lambda _: self._restyle())
         i18n.subscribe(self._retranslate)
         self._restyle()
 
-    def _make_card(self, title_key: str):
+    def _tab_container(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(20, 20, 20, 20)
+        v.setSpacing(16)
+        return w, v
+
+    def _make_card(self, title_key):
         card = QFrame()
         card.setObjectName("settingsCard")
         v = QVBoxLayout(card)
@@ -2397,33 +2196,280 @@ class SettingsDialog(QDialog):
         v.addWidget(lbl)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(32)
-        grid.setVerticalSpacing(16)
+        grid.setHorizontalSpacing(28)
+        grid.setVerticalSpacing(14)
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
         v.addLayout(grid)
 
         return card, grid
 
-    def _toggle_centered(self, toggle, width):
+    def _center_in(self, widget, width):
         w = QWidget()
         w.setFixedWidth(width)
         lay = QHBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
         lay.addStretch(1)
-        lay.addWidget(toggle)
+        lay.addWidget(widget)
         lay.addStretch(1)
         return w
 
-    def _on_autostart_toggled(self, checked: bool):
+    def _build_general_tab(self):
+        w, v = self._tab_container()
+
+        card1, grid1 = self._make_card("section_appearance")
+
+        lbl = QLabel(t("label_language")); self._label_widgets.append((lbl, "label_language"))
+        grid1.addWidget(lbl, 0, 0)
+        self.lang_seg = SegmentedControl(
+            [("seg_lang_ru", "ru"), ("seg_lang_en", "en")],
+            settings.get("language", "ru"))
+        grid1.addWidget(self.lang_seg, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        lbl = QLabel(t("label_theme")); self._label_widgets.append((lbl, "label_theme"))
+        grid1.addWidget(lbl, 1, 0)
+        self.theme_seg = SegmentedControl(
+            [("seg_theme_system", "system"), ("seg_theme_light", "light"),
+             ("seg_theme_dark", "dark")],
+            settings.get("theme", "system"))
+        grid1.addWidget(self.theme_seg, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        v.addWidget(card1)
+
+        card2, grid2 = self._make_card("section_startup")
+
+        lbl = QLabel(t("label_autostart")); self._label_widgets.append((lbl, "label_autostart"))
+        grid2.addWidget(lbl, 0, 0)
+        self.autostart_toggle = ToggleSwitch(settings.get("autostart", False))
+        self.autostart_toggle.toggled.connect(self._on_autostart_toggle)
+        grid2.addWidget(self.autostart_toggle, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        lbl = QLabel(t("label_start_min")); self._label_widgets.append((lbl, "label_start_min"))
+        grid2.addWidget(lbl, 1, 0)
+        self.start_min_toggle = ToggleSwitch(settings.get("start_minimized", False))
+        grid2.addWidget(self.start_min_toggle, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        v.addWidget(card2)
+        v.addStretch(1)
+        return w
+
+    def _build_security_tab(self):
+        w, v = self._tab_container()
+        card, grid = self._make_card("section_security")
+
+        NUM_W = 100
+        rows = [
+            ("password_length", "label_pw_len", settings.get("password_length", 18), 8, 128),
+            ("clipboard_timeout", "label_clip_timeout", settings.get("clipboard_timeout", 30), 5, 600),
+            ("session_timeout", "label_session_timeout", settings.get("session_timeout", 300), 30, 7200),
+        ]
+        self._num_edits = {}
+        for i, (key, label_key, value, min_v, max_v) in enumerate(rows):
+            lbl = QLabel(t(label_key)); self._label_widgets.append((lbl, label_key))
+            grid.addWidget(lbl, i, 0)
+            edit = QLineEdit(str(value))
+            edit.setValidator(QIntValidator(min_v, max_v, self))
+            edit.setFixedWidth(NUM_W)
+            edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            edit.setMinimumHeight(40)
+            grid.addWidget(edit, i, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+            self._num_edits[key] = edit
+
+        lbl = QLabel(t("label_confirm_delete")); self._label_widgets.append((lbl, "label_confirm_delete"))
+        grid.addWidget(lbl, 3, 0)
+        self.confirm_delete_toggle = ToggleSwitch(settings.get("confirm_delete", True))
+        grid.addWidget(self._center_in(self.confirm_delete_toggle, NUM_W), 3, 1,
+                       alignment=Qt.AlignmentFlag.AlignLeft)
+
+        lbl = QLabel(t("label_minimize_tray")); self._label_widgets.append((lbl, "label_minimize_tray"))
+        grid.addWidget(lbl, 4, 0)
+        self.minimize_tray_toggle = ToggleSwitch(settings.get("minimize_to_tray", True))
+        grid.addWidget(self._center_in(self.minimize_tray_toggle, NUM_W), 4, 1,
+                       alignment=Qt.AlignmentFlag.AlignLeft)
+
+        v.addWidget(card)
+        v.addStretch(1)
+        return w
+
+    def _build_github_tab(self):
+        w, v = self._tab_container()
+        card, grid = self._make_card("section_sync")
+
+        lbl = QLabel(t("label_github_enabled")); self._label_widgets.append((lbl, "label_github_enabled"))
+        grid.addWidget(lbl, 0, 0)
+        self.github_enabled_toggle = ToggleSwitch(settings.get("github_enabled", False))
+        self.github_enabled_toggle.toggled.connect(self._on_github_toggle)
+        grid.addWidget(self.github_enabled_toggle, 0, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        lbl = QLabel(t("label_github_url_field")); self._label_widgets.append((lbl, "label_github_url_field"))
+        grid.addWidget(lbl, 1, 0)
+        self.github_url_edit = QLineEdit(settings.get("github_url", ""))
+        self.github_url_edit.setPlaceholderText(t("ph_github_url"))
+        self.github_url_edit.setMinimumHeight(40)
+        grid.addWidget(self.github_url_edit, 1, 1)
+
+        lbl = QLabel(t("label_github_token")); self._label_widgets.append((lbl, "label_github_token"))
+        grid.addWidget(lbl, 2, 0)
+        token_row = QHBoxLayout()
+        token_row.setSpacing(8)
+        self.github_token_edit = QLineEdit(settings.get("github_token", ""))
+        self.github_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.github_token_edit.setPlaceholderText(t("ph_github_token"))
+        self.github_token_edit.setMinimumHeight(40)
+        token_row.addWidget(self.github_token_edit, 1)
+        self.github_token_show = QPushButton(t("btn_show"))
+        self.github_token_show.setCheckable(True)
+        self.github_token_show.setFixedSize(110, 40)
+        self.github_token_show.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.github_token_show.toggled.connect(self._toggle_token_show)
+        token_row.addWidget(self.github_token_show)
+        token_wrap = QWidget()
+        token_wrap.setLayout(token_row)
+        token_row.setContentsMargins(0, 0, 0, 0)
+        grid.addWidget(token_wrap, 2, 1)
+
+        FIELD_W = 140
+
+        lbl = QLabel(t("label_github_branch")); self._label_widgets.append((lbl, "label_github_branch"))
+        grid.addWidget(lbl, 3, 0)
+        self.github_branch_edit = QLineEdit(settings.get("github_branch", "main"))
+        self.github_branch_edit.setFixedWidth(FIELD_W)
+        self.github_branch_edit.setMinimumHeight(40)
+        self.github_branch_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(self.github_branch_edit, 3, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        lbl = QLabel(t("label_github_interval")); self._label_widgets.append((lbl, "label_github_interval"))
+        grid.addWidget(lbl, 4, 0)
+        self.github_interval_edit = QLineEdit(str(settings.get("github_sync_interval", 600)))
+        self.github_interval_edit.setValidator(QIntValidator(60, 86400, self))
+        self.github_interval_edit.setFixedWidth(FIELD_W)
+        self.github_interval_edit.setMinimumHeight(40)
+        self.github_interval_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(self.github_interval_edit, 4, 1, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        lower = QWidget()
+        lower_lay = QHBoxLayout(lower)
+        lower_lay.setContentsMargins(0, 0, 0, 0)
+        lower_lay.setSpacing(16)
+
+        self._github_hint = QLabel(t("gh_auth_help"))
+        self._github_hint.setWordWrap(True)
+        self._github_hint.setMinimumHeight(90)
+        self._github_hint.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        lower_lay.addWidget(self._github_hint, 1)
+
+        right = QWidget()
+        right.setFixedWidth(340)
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(0)
+        right_lay.addStretch(1)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(12)
+
+        self.github_test_label = QLabel("")
+        self.github_test_label.setWordWrap(True)
+        self.github_test_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        status_row.addWidget(self.github_test_label, 1)
+
+        self.github_test_btn = QPushButton(t("btn_test_connection"))
+        self.github_test_btn.setMinimumHeight(38)
+        self.github_test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.github_test_btn.clicked.connect(self._on_test_connection)
+        status_row.addWidget(self.github_test_btn, 0)
+
+        right_lay.addLayout(status_row)
+
+        lower_lay.addWidget(right, 0)
+        grid.addWidget(lower, 5, 0, 1, 2)
+
+        grid.setRowStretch(6, 1)
+
+        v.addWidget(card)
+        v.addStretch(1)
+        self._on_github_toggle(self.github_enabled_toggle.isChecked())
+        return w
+
+    def _toggle_token_show(self, checked):
+        self.github_token_edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
+        self.github_token_show.setText(t("btn_hide") if checked else t("btn_show"))
+
+    def _on_autostart_toggle(self, checked):
         self.start_min_toggle.setEnabled(checked)
         if not checked and self.start_min_toggle.isChecked():
             self.start_min_toggle.setChecked(False)
 
-    def _on_theme_change(self, _t):
+    def _on_github_toggle(self, checked):
+        for w in (self.github_url_edit, self.github_token_edit,
+                  self.github_branch_edit, self.github_interval_edit,
+                  self.github_test_btn, self.github_token_show):
+            w.setEnabled(checked)
+        if not checked:
+            self._tested_pair = None
+            self.github_token_show.setChecked(False)
+
+    def _on_test_connection(self):
+        url = self.github_url_edit.text().strip()
+        token = self.github_token_edit.text().strip()
+        if not url:
+            self._set_test_status(False, t("gh_test_need_url")); return
+        if not token:
+            self._set_test_status(False, t("gh_test_need_token")); return
+
+        self._tested_pair = None
+        self._testing = True
+        self._set_test_status(None, t("gh_test_testing"))
+        self.github_test_btn.setEnabled(False)
+
+        def worker():
+            try:
+                ok, msg = nimbus_sync.test_connection(url, token, timeout=30)
+            except Exception as e:
+                ok, msg = False, f"exception: {e}"
+            try:
+                self._test_finished.emit(ok, msg, url, token)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+        QTimer.singleShot(35000, lambda: self._hard_timeout(url, token))
+
+    def _hard_timeout(self, url, token):
         try:
-            self._restyle()
+            if self._testing:
+                self._on_test_result(False, "timeout 35s (UI)", url, token)
+        except RuntimeError:
+            pass
+
+    def _on_test_result(self, ok, msg, url, token):
+        try:
+            self._testing = False
+            self.github_test_btn.setEnabled(self.github_enabled_toggle.isChecked())
+            if ok:
+                self._tested_pair = (url, token)
+                self._set_test_status(True, t("gh_test_ok"))
+            else:
+                self._set_test_status(False, t("gh_test_fail", err=msg))
+        except RuntimeError:
+            pass
+
+    def _set_test_status(self, ok, text):
+        try:
+            t_ = theme.current()
+            if ok is True:
+                color = "#16a34a" if theme.name == "light" else "#22c55e"
+            elif ok is False:
+                color = t_["danger"]
+            else:
+                color = t_["text_muted"]
+            self.github_test_label.setText(text)
+            self.github_test_label.setStyleSheet(
+                f"font-size: 12px; color: {color}; background: transparent;")
         except RuntimeError:
             pass
 
@@ -2431,130 +2477,184 @@ class SettingsDialog(QDialog):
         try:
             self.setWindowTitle(t("title_settings"))
             self.title_label.setText(t("title_settings"))
+            self.tabs.setTabText(0, t("tab_general"))
+            self.tabs.setTabText(1, t("tab_security"))
+            self.tabs.setTabText(2, t("tab_github"))
             for lbl, key in self._label_widgets:
                 lbl.setText(t(key))
             for lbl, key in self._section_widgets:
                 lbl.setText(t(key))
             self.cancel_btn.setText(t("btn_cancel"))
             self.save_btn.setText(t("btn_save"))
+            self.github_url_edit.setPlaceholderText(t("ph_github_url"))
+            self.github_token_edit.setPlaceholderText(t("ph_github_token"))
+            self.github_test_btn.setText(t("btn_test_connection"))
+            self.github_token_show.setText(
+                t("btn_hide") if self.github_token_show.isChecked() else t("btn_show"))
+            self._github_hint.setText(t("gh_auth_help"))
         except RuntimeError:
             pass
 
     def _restyle(self):
-        t_ = theme.current()
-        self.setStyleSheet(build_qss(t_) + f"""
-            QDialog {{ background: {t_['window_bg']}; }}
-            QLabel {{ background: transparent; }}
-            QFrame#settingsCard {{
-                background: {t_['card']};
-                border: 1px solid {t_['card_border']};
-                border-radius: 12px;
-            }}
-        """)
-        self.title_label.setStyleSheet(f"""
-            font-size: 26px; font-weight: 700;
-            color: {t_['text']};
-            background: transparent;
-        """)
-        for lbl, _key in self._label_widgets:
+        try:
+            t_ = theme.current()
+            self.setStyleSheet(build_qss(t_))
+            self.title_label.setStyleSheet(
+                f"font-size: 24px; font-weight: 700; color: {t_['text']}; background: transparent;")
+            for lbl, _ in self._label_widgets:
+                lbl.setStyleSheet(f"font-size: 15px; color: {t_['text']}; background: transparent;")
+            for lbl, _ in self._section_widgets:
+                lbl.setStyleSheet(
+                    f"font-size: 11px; font-weight: 700; color: {t_['text_muted']}; "
+                    f"letter-spacing: 1.5px; background: transparent;")
             try:
-                lbl.setStyleSheet(f"""
-                    font-size: 15px;
-                    color: {t_['text']};
-                    background: transparent;
-                """)
-            except RuntimeError:
+                self._github_hint.setStyleSheet(
+                    f"font-size: 11px; color: {t_['text_muted']}; "
+                    f"background: transparent; padding: 0;")
+            except Exception:
                 pass
-        for lbl, _key in self._section_widgets:
-            try:
-                lbl.setStyleSheet(f"""
-                    font-size: 12px;
-                    font-weight: 700;
-                    color: {t_['text_muted']};
-                    letter-spacing: 1.4px;
-                    background: transparent;
-                """)
-            except RuntimeError:
-                pass
-        self.save_btn.setStyleSheet(primary_btn_qss(t_))
+            self.save_btn.setStyleSheet(primary_btn_qss(t_))
+        except RuntimeError:
+            pass
 
     def _save(self):
         lang = self.lang_seg.value() or "ru"
         theme_mode = self.theme_seg.value() or "system"
         autostart = self.autostart_toggle.isChecked()
         start_min = self.start_min_toggle.isChecked() and autostart
-
         try:
             pw_len = int(self._num_edits["password_length"].text() or "18")
         except ValueError:
             pw_len = 18
         pw_len = max(8, min(128, pw_len))
-
         try:
             clip_t = int(self._num_edits["clipboard_timeout"].text() or "30")
         except ValueError:
             clip_t = 30
         clip_t = max(5, min(600, clip_t))
-
         try:
             sess_t = int(self._num_edits["session_timeout"].text() or "300")
         except ValueError:
             sess_t = 300
         sess_t = max(30, min(7200, sess_t))
-
         confirm_delete = self.confirm_delete_toggle.isChecked()
         minimize_tray = self.minimize_tray_toggle.isChecked()
+        github_enabled = self.github_enabled_toggle.isChecked()
+        github_url = self.github_url_edit.text().strip()
+        github_token = self.github_token_edit.text().strip()
+        github_branch = self.github_branch_edit.text().strip() or "main"
+        try:
+            github_interval = int(self.github_interval_edit.text() or "600")
+        except ValueError:
+            github_interval = 600
+        github_interval = max(60, min(86400, github_interval))
 
-        old_autostart = settings.get("autostart", False)
-        old_start_min = settings.get("start_minimized", False)
+        if github_enabled:
+            if not github_url:
+                QMessageBox.warning(self, t("title_error"),
+                                    t("gh_test_need_url") + "\n\n" + t("gh_save_fail"))
+                return
+            if not github_url.lower().startswith("https://"):
+                QMessageBox.warning(self, t("title_error"),
+                                    "URL должен начинаться с https://\n\n" + t("gh_save_fail"))
+                return
+            if not github_token:
+                QMessageBox.warning(self, t("title_error"),
+                                    t("gh_test_need_token") + "\n\n" + t("gh_save_fail"))
+                return
+            if self._tested_pair != (github_url, github_token):
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                try:
+                    ok, msg = nimbus_sync.test_connection(github_url, github_token, timeout=30)
+                finally:
+                    QApplication.restoreOverrideCursor()
+                if not ok:
+                    QMessageBox.critical(self, t("title_error"),
+                                         t("gh_test_fail", err=msg) + "\n\n" + t("gh_save_fail"))
+                    return
+                self._tested_pair = (github_url, github_token)
+
+        old_auto = settings.get("autostart", False)
+        old_min = settings.get("start_minimized", False)
 
         settings.update({
-            "language": lang,
-            "theme": theme_mode,
-            "autostart": autostart,
-            "start_minimized": start_min,
-            "password_length": pw_len,
-            "clipboard_timeout": clip_t,
-            "session_timeout": sess_t,
-            "confirm_delete": confirm_delete,
+            "language": lang, "theme": theme_mode,
+            "autostart": autostart, "start_minimized": start_min,
+            "password_length": pw_len, "clipboard_timeout": clip_t,
+            "session_timeout": sess_t, "confirm_delete": confirm_delete,
             "minimize_to_tray": minimize_tray,
+            "github_enabled": github_enabled, "github_url": github_url,
+            "github_token": github_token, "github_branch": github_branch,
+            "github_sync_interval": github_interval,
         })
-
         theme.set_mode(theme_mode, save=False)
         i18n.set_language(lang)
-
-        if autostart != old_autostart or (autostart and start_min != old_start_min):
+        if autostart != old_auto or (autostart and start_min != old_min):
             set_autostart(autostart)
-
         nimbus.CLIPBOARD_CLEAR_SECONDS = clip_t
         nimbus.SESSION_TIMEOUT = sess_t
-
         self.accept()
+
+    def _on_preview_language(self, lang):
+        if lang in ("ru", "en"):
+            i18n.set_language(lang)
+
+    def _on_preview_theme(self, mode):
+        if mode in ("system", "light", "dark"):
+            theme.set_mode(mode, save=False)
+
+    def reject(self):
+        try:
+            theme.set_mode(self._orig_theme, save=False)
+            i18n.set_language(self._orig_lang)
+        except Exception as e:
+            print(f"[settings] revert: {e}")
+        super().reject()
 
 
 # ---------------------------------------------------------------------------
-# Главное окно
+# MainWindow
 # ---------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
+    _sync_trigger = pyqtSignal()
+    _sync_reload = pyqtSignal()
+    _sync_refresh = pyqtSignal()
+    _sync_retry = pyqtSignal()
+    _sync_status = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
-
         self.setWindowTitle("Nimbus")
         self.setWindowIcon(load_app_icon())
         self.setMinimumSize(1000, 640)
         self.resize(1200, 760)
 
-        self.crypto: Optional[nimbus.EncryptionManager] = None
-        self.storage: Optional[nimbus.Storage] = None
+        self.crypto = None
+        self.storage = None
         self.session = nimbus.Session()
         self._last_activity = time.time()
-
         self._real_quit = False
         self._tray_hint_shown = False
         self._settings_btn = None
         self._top_frame = None
         self._add_btn = None
+
+        self._git_sync = None
+        self._sync_in_progress = False
+        self._sync_pending = False
+        self._sync_indicator = None
+        self._sync_config = None
+        self._sync_last_error = False
+        self._sync_last_error_text = ""
+        self._sync_timer = QTimer(self)
+        self._sync_timer.timeout.connect(self._trigger_sync)
+
+        self._sync_trigger.connect(self._trigger_sync)
+        self._sync_reload.connect(self._reload_from_disk)
+        self._sync_refresh.connect(self._refresh_sync_indicator)
+        self._sync_retry.connect(self._trigger_sync)
+        self._sync_status.connect(self._show_status)
 
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
@@ -2574,25 +2674,19 @@ class MainWindow(QMainWindow):
         self._idle_timer.start(5000)
 
         theme.subscribe(self._on_theme_changed)
-        i18n.subscribe(self._on_language_changed)
+        i18n.subscribe(self._on_lang_changed)
         self._apply_theme()
-
         try:
             QApplication.styleHints().colorSchemeChanged.connect(
-                theme.on_system_color_scheme_changed
-            )
+                theme.on_system_color_scheme_changed)
         except Exception:
             pass
-
         QApplication.instance().installEventFilter(self)
-
         self._setup_tray()
+        QTimer.singleShot(150, self._ensure_user)
 
-        QTimer.singleShot(150, self._ensure_user_exists)
-
-    def _ensure_user_exists(self):
-        users = nimbus.list_existing_users()
-        if not users:
+    def _ensure_user(self):
+        if not nimbus.list_existing_users():
             self._initial_register()
 
     def _initial_register(self):
@@ -2600,23 +2694,34 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             QApplication.instance().quit()
             return
-        self.login_view.show_text(
-            t("reg_ok", name=dlg.username),
-            theme.current()["accent"],
-        )
+        if dlg.restore_mode and dlg.github_url:
+            try:
+                username = nimbus_sync.clone_from_github(
+                    dlg.github_url, _SCRIPT_DIR, token=dlg.github_token or None)
+            except Exception as e:
+                self.login_view.show_text(t("status_sync_err", e=e),
+                                          theme.current()["danger"])
+                return
+            paths = nimbus.UserPaths(username)
+            s = load_settings(paths.settings_file)
+            s["github_url"] = dlg.github_url
+            s["github_enabled"] = True
+            s["github_branch"] = "main"
+            if dlg.github_token:
+                s["github_token"] = dlg.github_token
+            save_settings(paths.settings_file, s)
+            self.login_view.show_text(t("restore_ok", name=username),
+                                      theme.current()["accent"])
+            return
+        if dlg.username:
+            self.login_view.show_text(t("reg_ok", name=dlg.username),
+                                      theme.current()["accent"])
 
     def eventFilter(self, obj, event):
         et = event.type()
-        if et in (
-            QEvent.Type.MouseButtonPress,
-            QEvent.Type.MouseButtonRelease,
-            QEvent.Type.MouseMove,
-            QEvent.Type.KeyPress,
-            QEvent.Type.KeyRelease,
-            QEvent.Type.Wheel,
-            QEvent.Type.TouchBegin,
-            QEvent.Type.TouchUpdate,
-        ):
+        if et in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                  QEvent.Type.MouseMove, QEvent.Type.KeyPress, QEvent.Type.KeyRelease,
+                  QEvent.Type.Wheel, QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate):
             self._touch()
         return super().eventFilter(obj, event)
 
@@ -2630,15 +2735,13 @@ class MainWindow(QMainWindow):
     def _check_idle(self):
         if not self.session.auth:
             return
-        timeout = nimbus.SESSION_TIMEOUT
-        if time.time() - self._last_activity > timeout:
+        if time.time() - self._last_activity > nimbus.SESSION_TIMEOUT:
             self._logout(expired=True)
 
     def _setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(load_app_icon())
         self.tray_icon.setToolTip("Nimbus")
-
         menu = QMenu()
         self._tray_open_action = QAction(t("tray_open"), self)
         self._tray_open_action.triggered.connect(self._show_from_tray)
@@ -2647,7 +2750,6 @@ class MainWindow(QMainWindow):
         self._tray_quit_action = QAction(t("tray_quit"), self)
         self._tray_quit_action.triggered.connect(self._quit_app)
         menu.addAction(self._tray_quit_action)
-
         self._tray_menu = menu
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
@@ -2659,9 +2761,7 @@ class MainWindow(QMainWindow):
             self._show_from_tray()
 
     def _show_from_tray(self):
-        self.showNormal()
-        self.raise_()
-        self.activateWindow()
+        self.showNormal(); self.raise_(); self.activateWindow()
 
     def _quit_app(self):
         if self.session.auth:
@@ -2678,9 +2778,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self._real_quit:
-            event.accept()
-            return
-
+            event.accept(); return
         if not settings.get("minimize_to_tray", True):
             if self.session.auth:
                 try:
@@ -2695,142 +2793,216 @@ class MainWindow(QMainWindow):
             event.accept()
             QApplication.instance().quit()
             return
-
         event.ignore()
-        was_authenticated = self.session.auth
-        if was_authenticated:
+        was_auth = self.session.auth
+        if was_auth:
             try:
                 self._logout(expired=False)
             except Exception as e:
                 print(f"[tray] logout error: {e}")
-
         self.hide()
-
         if not self._tray_hint_shown and self.tray_icon.supportsMessages():
             try:
-                msg = (t("tray_min_auth") if was_authenticated else t("tray_min"))
-                self.tray_icon.showMessage(
-                    "Nimbus",
-                    msg + t("tray_min_hint"),
-                    QSystemTrayIcon.MessageIcon.Information,
-                    4000,
-                )
+                msg = t("tray_min_auth") if was_auth else t("tray_min")
+                self.tray_icon.showMessage("Nimbus", msg + t("tray_min_hint"),
+                                           QSystemTrayIcon.MessageIcon.Information, 4000)
                 self._tray_hint_shown = True
             except Exception:
                 pass
 
-    def _on_theme_changed(self, _t):
+    def _on_theme_changed(self, _):
         try:
             self._apply_theme()
+            self._restyle_main()
         except Exception as e:
-            print(f"[main] apply_theme: {e}")
-        try:
-            self._restyle_main_elements()
-        except Exception as e:
-            print(f"[main] restyle_main: {e}")
+            print(f"[main] theme: {e}")
 
-    def _on_language_changed(self):
+    def _on_lang_changed(self):
         try:
-            if self._tray_open_action is not None:
+            if self._tray_open_action:
                 self._tray_open_action.setText(t("tray_open"))
-            if self._tray_quit_action is not None:
+            if self._tray_quit_action:
                 self._tray_quit_action.setText(t("tray_quit"))
-        except RuntimeError:
-            pass
-        try:
             self._retranslate_main()
         except Exception as e:
-            print(f"[main] retranslate_main: {e}")
+            print(f"[main] lang: {e}")
 
     def _apply_theme(self):
         t_ = theme.current()
-        self.setStyleSheet(build_qss(t_) + f"""
-            QMainWindow {{ background: {t_['window_bg']}; }}
-        """)
+        self.setStyleSheet(build_qss(t_) + f"QMainWindow {{ background: {t_['window_bg']}; }}")
 
-    def _restyle_main_elements(self):
-        t_ = theme.current()
-        if self._top_frame is not None:
-            try:
-                self._top_frame.setStyleSheet(f"""
-                    QFrame {{
-                        background: {t_['top_panel']};
-                        border: 1px solid {t_['card_border']};
-                        border-radius: 6px;
-                    }}
-                """)
-            except RuntimeError:
-                self._top_frame = None
-        if self._add_btn is not None:
-            try:
+    def _restyle_main(self):
+        try:
+            t_ = theme.current()
+            if self._top_frame:
+                self._top_frame.setStyleSheet(
+                    f"QFrame {{ background: {t_['top_panel']}; "
+                    f"border: 1px solid {t_['card_border']}; border-radius: 6px; }}")
+            if self._add_btn:
                 self._add_btn.setStyleSheet(primary_btn_qss(t_))
-            except RuntimeError:
-                self._add_btn = None
-        if self._settings_btn is not None:
-            try:
-                self._settings_btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background: transparent;
-                        border: 1px solid {t_['btn_border']};
-                        border-radius: 4px;
-                        color: {t_['text_sec']};
-                        font-size: 18px;
-                        padding: 0;
-                    }}
-                    QPushButton:hover {{
-                        background: {t_['btn_accent_hover_bg']};
-                        border: 1px solid {t_['accent']};
-                        color: {t_['accent']};
-                    }}
-                """)
-            except RuntimeError:
-                self._settings_btn = None
+        except RuntimeError:
+            pass
 
     def _retranslate_main(self):
+        for attr, key in [("search_edit", None), ("_logout_btn", "btn_logout"),
+                          ("_add_btn", "btn_create"), ("_import_btn", "btn_import"),
+                          ("_export_text_btn", "btn_export_text"),
+                          ("_export_archive_btn", "btn_export_archive"),
+                          ("edit_btn", "btn_edit"), ("copy_btn", "btn_copy_password"),
+                          ("delete_btn", "btn_delete")]:
+            w = getattr(self, attr, None)
+            if w is None:
+                continue
+            try:
+                if attr == "search_edit":
+                    w.setPlaceholderText(t("search_placeholder"))
+                else:
+                    w.setText(t(key))
+            except (RuntimeError, AttributeError):
+                pass
         try:
-            self.search_edit.setPlaceholderText(t("search_placeholder"))
-        except (RuntimeError, AttributeError):
-            pass
-        try:
-            self._logout_btn.setText(t("btn_logout"))
-        except (RuntimeError, AttributeError):
-            pass
-        try:
-            self._add_btn.setText(t("btn_create"))
-        except (RuntimeError, AttributeError):
-            pass
-        try:
-            self._import_btn.setText(t("btn_import"))
-        except (RuntimeError, AttributeError):
-            pass
-        try:
-            self._export_text_btn.setText(t("btn_export_text"))
-        except (RuntimeError, AttributeError):
-            pass
-        try:
-            self._export_archive_btn.setText(t("btn_export_archive"))
-        except (RuntimeError, AttributeError):
-            pass
-        try:
-            self.edit_btn.setText(t("btn_edit"))
-        except (RuntimeError, AttributeError):
-            pass
-        try:
-            self.copy_btn.setText(t("btn_copy_password"))
-        except (RuntimeError, AttributeError):
-            pass
-        try:
-            self.delete_btn.setText(t("btn_delete"))
+            self._settings_btn.setText(t("btn_settings"))
         except (RuntimeError, AttributeError):
             pass
         try:
             self.model.refresh_headers()
-        except (RuntimeError, AttributeError):
-            pass
-        try:
             self._update_count()
         except (RuntimeError, AttributeError):
             pass
+
+    # --- sync ---
+
+    def _setup_sync_after_login(self, paths):
+        try:
+            self._sync_timer.stop()
+        except Exception:
+            pass
+        self._git_sync = None
+        self._sync_in_progress = False
+        self._sync_pending = False
+        self._sync_last_error = False
+        self._sync_last_error_text = ""
+
+        if not (settings.get("github_enabled") and settings.get("github_url")
+                and settings.get("github_token")):
+            self._sync_config = None
+            self._refresh_sync_indicator()
+            return
+
+        self._git_sync = nimbus_sync.GitSync(
+            repo_dir=_SCRIPT_DIR,
+            remote_url=settings.get("github_url"),
+            username=paths.username,
+            branch=settings.get("github_branch", "main"),
+            token=settings.get("github_token") or None,
+        )
+        interval = max(60, int(settings.get("github_sync_interval", 600)))
+        self._sync_timer.start(interval * 1000)
+        self._sync_config = (
+            settings.get("github_enabled"),
+            settings.get("github_url"),
+            settings.get("github_token"),
+            settings.get("github_branch"),
+            settings.get("github_sync_interval"),
+        )
+        self._refresh_sync_indicator()
+        QTimer.singleShot(200, self._trigger_sync)
+
+    def _refresh_sync_indicator(self):
+        if not self._sync_indicator:
+            return
+        if not self._git_sync:
+            self._sync_indicator.set_state(SyncIndicator.STATE_OFF);
+            return
+        if self._sync_in_progress:
+            self._sync_indicator.set_state(SyncIndicator.STATE_SYNCING);
+            return
+        last = self._git_sync.get_last_sync_time()
+        if self._sync_last_error:
+            self._sync_indicator.set_state(
+                SyncIndicator.STATE_ERROR, last,
+                self._sync_last_error_text or None,
+            )
+        else:
+            self._sync_indicator.set_state(SyncIndicator.STATE_OK, last)
+
+    def _trigger_sync(self):
+        if not self._git_sync or not self.storage:
+            return
+        if self._sync_in_progress:
+            self._sync_pending = True
+            return
+        self._sync_in_progress = True
+        self._sync_pending = False
+        if self._sync_indicator:
+            self._sync_indicator.set_state(SyncIndicator.STATE_SYNCING)
+        threading.Thread(target=self._sync_worker, daemon=True).start()
+
+    def _sync_worker(self):
+        need_again = False
+        try:
+            res = self._git_sync.sync(self.storage, log=print)
+            status = res.get("status", "")
+            is_error = status.startswith("error")
+            self._sync_last_error = is_error
+            if is_error:
+                self._sync_last_error_text = (
+                    status[7:] if status.startswith("error: ") else status
+                )
+                print(f"[sync] {status}")
+                self._sync_status.emit(
+                    f"Sync: {self._sync_last_error_text[:80]}"
+                )
+            else:
+                self._sync_last_error_text = ""
+            if res.get("reload_needed") or res.get("merged") or res.get("pulled"):
+                self._sync_reload.emit()
+        except Exception as e:
+            print(f"[sync] worker error: {e}")
+            self._sync_last_error = True
+            self._sync_last_error_text = str(e)
+            self._sync_status.emit(f"Sync: {e!s}"[:80])
+        finally:
+            self._sync_in_progress = False
+            need_again = self._sync_pending
+            self._sync_pending = False
+            self._sync_refresh.emit()
+            if need_again:
+                self._sync_retry.emit()
+
+    def _reload_from_disk(self):
+        if not self.storage:
+            return
+        try:
+            self.storage._raw_data = self.storage._load()
+            self.storage._sync_data()
+            if hasattr(self, "model"):
+                self.model.refresh()
+            self._update_count()
+            self._update_action_buttons()
+        except Exception as e:
+            print(f"[sync] reload: {e}")
+
+    def _persist_mutation(self, fn, message):
+        fn()
+        if self._git_sync:
+            threading.Thread(
+                target=self._git_commit_worker,
+                args=(message,),
+                daemon=True,
+            ).start()
+
+    def _git_commit_worker(self, message):
+        try:
+            self._git_sync.do_and_commit(lambda: None, message)
+        except Exception as e:
+            print(f"[sync] commit: {e}")
+        try:
+            self._sync_trigger.emit()
+        except Exception as e:
+            print(f"[sync] trigger emit: {e}")
+
+    # --- login ---
 
     def _on_login_success(self, crypto, storage, paths):
         self.crypto = crypto
@@ -2841,27 +3013,37 @@ class MainWindow(QMainWindow):
         self.session.paths = paths
         self.session.username = paths.username
         self.session.salt = nimbus.load_or_create_salt(paths.salt_file)
-
         save_last_user(paths.username)
-
         settings.reload_for_user(paths.settings_file)
         theme.set_mode(settings.get("theme", "system"), save=False)
         i18n.set_language(settings.get("language", "ru"))
         nimbus.CLIPBOARD_CLEAR_SECONDS = settings.get("clipboard_timeout", 30)
         nimbus.SESSION_TIMEOUT = settings.get("session_timeout", 300)
-
         try:
             paths.ensure_dir()
         except Exception:
             pass
-
         self._touch()
         self._build_main_view()
         self.stack.setCurrentIndex(1)
+        self._setup_sync_after_login(paths)
 
     def _open_settings(self):
         dlg = SettingsDialog(self)
-        dlg.exec()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_cfg = (
+            settings.get("github_enabled"),
+            settings.get("github_url"),
+            settings.get("github_token"),
+            settings.get("github_branch"),
+            settings.get("github_sync_interval"),
+        )
+        if new_cfg != self._sync_config:
+            if self.session.paths:
+                self._setup_sync_after_login(self.session.paths)
+            else:
+                self._refresh_sync_indicator()
 
     def _build_main_view(self):
         t_ = theme.current()
@@ -2875,66 +3057,50 @@ class MainWindow(QMainWindow):
         tl = QHBoxLayout(top)
         tl.setContentsMargins(14, 8, 14, 8)
         tl.setSpacing(10)
-
         self.switch = ThemeSwitch(top)
         tl.addWidget(self.switch, alignment=Qt.AlignmentFlag.AlignVCenter)
-
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText(t("search_placeholder"))
         self.search_edit.setMinimumHeight(38)
-        self.search_edit.textChanged.connect(self._on_search_changed)
+        self.search_edit.textChanged.connect(self._on_search)
         tl.addWidget(self.search_edit, 1)
-
-        self._settings_btn = QPushButton("⚙")
-        self._settings_btn.setFixedSize(38, 38)
+        self._settings_btn = QPushButton(t("btn_settings"))
+        self._settings_btn.setMinimumHeight(38)
         self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._settings_btn.clicked.connect(self._open_settings)
         tl.addWidget(self._settings_btn)
-
         self._logout_btn = QPushButton(t("btn_logout"))
         self._logout_btn.setObjectName("danger")
         self._logout_btn.clicked.connect(lambda: self._logout(expired=False))
         tl.addWidget(self._logout_btn)
-
         self.main_layout.addWidget(top)
 
-        actions = QFrame()
-        actions.setStyleSheet("background: transparent;")
+        actions = QFrame(); actions.setStyleSheet("background: transparent;")
         al = QHBoxLayout(actions)
         al.setContentsMargins(0, 0, 0, 0)
         al.setSpacing(8)
-
         self._add_btn = QPushButton(t("btn_create"))
         self._add_btn.setMinimumHeight(38)
         self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._add_btn.setStyleSheet(primary_btn_qss(t_))
         self._add_btn.clicked.connect(self._add_record)
         al.addWidget(self._add_btn)
-
         self._import_btn = QPushButton(t("btn_import"))
         self._import_btn.setMinimumHeight(38)
         self._import_btn.clicked.connect(self._import_records)
         al.addWidget(self._import_btn)
-
         self._export_text_btn = QPushButton(t("btn_export_text"))
         self._export_text_btn.setMinimumHeight(38)
-        self._export_text_btn.clicked.connect(self._export_text_records)
+        self._export_text_btn.clicked.connect(self._export_text)
         al.addWidget(self._export_text_btn)
-
         self._export_archive_btn = QPushButton(t("btn_export_archive"))
         self._export_archive_btn.setMinimumHeight(38)
         self._export_archive_btn.clicked.connect(self._export_archive)
         al.addWidget(self._export_archive_btn)
-
         al.addStretch()
-
         self.count_label = QLabel("")
-        self.count_label.setStyleSheet(f"""
-            color: {t_['text_muted']}; font-size: 13px;
-            background: transparent;
-        """)
+        self.count_label.setStyleSheet(f"color: {t_['text_muted']}; font-size: 18px; background: transparent;")
         al.addWidget(self.count_label)
-
         self.main_layout.addWidget(actions)
 
         self.model = RecordModel(self.storage)
@@ -2952,7 +3118,6 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(False)
         self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table.setStyleSheet("background: transparent;")
-
         header = self.table.horizontalHeader()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -2963,60 +3128,50 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         header.resizeSection(4, 100)
         header.setHighlightSections(False)
-
-        tile_delegate = TileDelegate(self.table)
+        td = TileDelegate(self.table)
         for col in (0, 1, 2, 3):
-            self.table.setItemDelegateForColumn(col, tile_delegate)
-
-        actions_delegate = TileDelegate(self.table, is_action_column=True,
-                                         on_action=self._on_row_action)
-        self.table.setItemDelegateForColumn(4, actions_delegate)
-
+            self.table.setItemDelegateForColumn(col, td)
+        ad = TileDelegate(self.table, is_action_column=True, on_action=self._on_row_action)
+        self.table.setItemDelegateForColumn(4, ad)
         self.table.clicked.connect(self._on_cell_clicked)
-        self.table.doubleClicked.connect(self._on_cell_double_clicked)
+        self.table.doubleClicked.connect(self._on_cell_dbl)
         self.table.selectionModel().selectionChanged.connect(
-            lambda *_: self._update_action_buttons()
-        )
-
+            lambda *_: self._update_action_btns())
         self.main_layout.addWidget(self.table, 1)
 
-        bottom = QFrame()
-        bottom.setStyleSheet("background: transparent;")
+        bottom = QFrame(); bottom.setStyleSheet("background: transparent;")
         bl = QHBoxLayout(bottom)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(8)
-
         self.edit_btn = QPushButton(t("btn_edit"))
         self.edit_btn.setMinimumHeight(36)
         self.edit_btn.clicked.connect(self._edit_selected)
         bl.addWidget(self.edit_btn)
-
         self.copy_btn = QPushButton(t("btn_copy_password"))
         self.copy_btn.setMinimumHeight(36)
-        self.copy_btn.clicked.connect(self._copy_selected_password)
+        self.copy_btn.clicked.connect(self._copy_selected_pw)
         bl.addWidget(self.copy_btn)
-
         self.delete_btn = QPushButton(t("btn_delete"))
         self.delete_btn.setObjectName("danger")
         self.delete_btn.setMinimumHeight(36)
         self.delete_btn.clicked.connect(self._delete_selected)
         bl.addWidget(self.delete_btn)
-
         bl.addStretch()
+        self._sync_indicator = SyncIndicator()
+        bl.addWidget(self._sync_indicator, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.main_layout.addWidget(bottom)
 
-        self._restyle_main_elements()
+        self._restyle_main()
         self._refresh_table()
-        self._update_action_buttons()
+        self._refresh_sync_indicator()
 
     def _refresh_table(self):
-        self.model.refresh()
-        self._update_count()
-        self._update_action_buttons()
+        self.model.refresh(); self._update_count(); self._update_action_btns()
 
     def _update_count(self):
-        total = self.model.rowCount()
-        visible = self.proxy.rowCount()
+        if not hasattr(self, "model"):
+            return
+        total = self.model.rowCount(); visible = self.proxy.rowCount()
         if total == 0:
             self.count_label.setText(t("count_empty"))
         elif visible == total:
@@ -3024,184 +3179,170 @@ class MainWindow(QMainWindow):
         else:
             self.count_label.setText(t("count_filtered", v=visible, t=total))
 
-    def _update_action_buttons(self):
-        has = self._selected_source_row() is not None
+    def _update_action_btns(self):
+        if not hasattr(self, "edit_btn"):
+            return
+        has = self._selected_row() is not None
         self.edit_btn.setEnabled(has)
         self.copy_btn.setEnabled(has)
         self.delete_btn.setEnabled(has)
 
-    def _on_search_changed(self, text: str):
-        self.proxy.set_filter_text(text)
-        self._update_count()
-        self._update_action_buttons()
+    def _on_search(self, text):
+        self.proxy.set_filter_text(text); self._update_count(); self._update_action_btns()
 
-    def _selected_source_row(self) -> Optional[int]:
-        indexes = self.table.selectionModel().selectedRows()
-        if not indexes:
+    def _selected_row(self):
+        idxs = self.table.selectionModel().selectedRows()
+        if not idxs:
             return None
-        source = self.proxy.mapToSource(indexes[0])
-        return source.row() if source.isValid() else None
+        src = self.proxy.mapToSource(idxs[0])
+        return src.row() if src.isValid() else None
 
-    def _selected_record(self) -> Optional[dict]:
-        row = self._selected_source_row()
-        if row is None:
-            return None
-        return self.model.get_record(row)
+    def _selected_record(self):
+        row = self._selected_row()
+        return self.model.get_record(row) if row is not None else None
 
-    def _on_cell_clicked(self, proxy_index: QModelIndex):
-        source = self.proxy.mapToSource(proxy_index)
-        if not source.isValid():
+    def _on_cell_clicked(self, idx):
+        src = self.proxy.mapToSource(idx)
+        if not src.isValid():
             return
-        rec = self.model.get_record(source.row())
+        rec = self.model.get_record(src.row())
         if not rec:
             return
-        col = source.column()
+        col = src.column()
         if col == 0:
-            self._copy_text(rec.get("service", ""), t("field_service"))
+            self._copy(rec.get("service", ""), t("field_service"))
         elif col == 1:
-            self._copy_text(rec.get("username", ""), t("field_login"))
+            self._copy(rec.get("username", ""), t("field_login"))
         elif col == 2:
-            self._copy_text(rec.get("password", ""), t("field_password"))
+            self._copy(rec.get("password", ""), t("field_password"))
         elif col == 3:
-            self._copy_text(rec.get("description", ""), t("field_description"))
+            self._copy(rec.get("description", ""), t("field_description"))
 
-    def _on_cell_double_clicked(self, proxy_index: QModelIndex):
-        source = self.proxy.mapToSource(proxy_index)
-        if not source.isValid():
+    def _on_cell_dbl(self, idx):
+        src = self.proxy.mapToSource(idx)
+        if not src.isValid():
             return
-        if source.column() == 2:
-            self.model.toggle_reveal(source.row())
-        elif source.column() != 4:
+        if src.column() == 2:
+            self.model.toggle_reveal(src.row())
+        elif src.column() != 4:
             self._edit_selected()
 
-    def _on_row_action(self, action: str, proxy_index: QModelIndex):
-        source = self.proxy.mapToSource(proxy_index)
-        if not source.isValid():
+    def _on_row_action(self, action, idx):
+        src = self.proxy.mapToSource(idx)
+        if not src.isValid():
             return
-        row = source.row()
+        row = src.row()
         if action == "edit":
             self._edit_row(row)
         elif action == "delete":
             self._delete_row(row)
 
-    def _copy_text(self, text: str, label: str):
+    def _copy(self, text, label):
         if not text or text == "—":
             return
         nimbus.copy_to_clipboard(text)
         self._show_status(t("status_copied", label=label))
 
-    def _copy_selected_password(self):
+    def _copy_selected_pw(self):
         rec = self._selected_record()
         if rec:
-            self._copy_text(rec.get("password", ""), t("field_password"))
+            self._copy(rec.get("password", ""), t("field_password"))
 
     def _add_record(self):
-        dialog = RecordDialog(self, "title_new_record")
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        dlg = RecordDialog(self, "title_new_record")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        rec = dialog.get_record()
+        rec = dlg.get_record()
         try:
-            self.storage.add(rec)
+            self._persist_mutation(lambda: self.storage.add(rec), "nimbus: add")
         except Exception as e:
-            QMessageBox.critical(
-                self, t("title_error"), t("status_save_failed", e=e)
-            )
+            QMessageBox.critical(self, t("title_error"), t("status_save_failed", e=e))
             return
         self._refresh_table()
         self._show_status(t("status_added", s=rec["service"]))
 
     def _edit_selected(self):
-        row = self._selected_source_row()
+        row = self._selected_row()
         if row is None:
-            self._show_status(t("status_select"))
-            return
+            self._show_status(t("status_select")); return
         self._edit_row(row)
 
-    def _edit_row(self, source_row: int):
-        rec = self.model.get_record(source_row)
+    def _edit_row(self, row):
+        rec = self.model.get_record(row)
         if not rec:
             return
-        dialog = RecordDialog(self, "title_edit_record", rec)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        dlg = RecordDialog(self, "title_edit_record", rec)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        new_rec = dialog.get_record()
+        new = dlg.get_record()
         try:
-            self.storage.update(source_row, new_rec)
+            self._persist_mutation(lambda: self.storage.update(row, new), "nimbus: update")
         except Exception as e:
-            QMessageBox.critical(
-                self, t("title_error"), t("status_save_failed", e=e)
-            )
+            QMessageBox.critical(self, t("title_error"), t("status_save_failed", e=e))
             return
         self._refresh_table()
         self._show_status(t("status_updated"))
 
     def _delete_selected(self):
-        row = self._selected_source_row()
+        row = self._selected_row()
         if row is None:
-            self._show_status(t("status_select"))
-            return
+            self._show_status(t("status_select")); return
         self._delete_row(row)
 
-    def _delete_row(self, source_row: int):
-        rec = self.model.get_record(source_row)
+    def _delete_row(self, row):
+        rec = self.model.get_record(row)
         if not rec:
             return
         if settings.get("confirm_delete", True):
             service = nimbus.safe_str(rec.get("service")) or "—"
-            dlg = MessageDialog(
-                self,
-                title=t("confirm_delete_title", s=service),
-                message=t("confirm_delete_msg"),
-                kind="danger",
-                confirm_text=t("btn_delete"),
-                cancel_text=t("btn_cancel"),
-            )
+            dlg = MessageDialog(self, t("confirm_delete_title", s=service),
+                                t("confirm_delete_msg"), kind="danger",
+                                confirm_text=t("btn_delete"), cancel_text=t("btn_cancel"))
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
         try:
-            self.storage.delete(source_row)
+            self._persist_mutation(lambda: self.storage.delete(row), "nimbus: delete")
         except Exception as e:
-            QMessageBox.critical(
-                self, t("title_error"), t("status_save_failed", e=e)
-            )
+            QMessageBox.critical(self, t("title_error"), t("status_save_failed", e=e))
             return
         self._refresh_table()
         self._show_status(t("status_deleted"))
 
-    def _confirm_master(self, action_key: str = "confirm_pw_action_default") -> bool:
+    def _confirm_master(self, action_key="confirm_pw_action_default"):
         if not self.session.paths:
             return False
-        dialog = ConfirmMasterDialog(
-            self,
-            self.session.salt,
-            self.session.paths.key_file,
-            action_key=action_key,
-        )
-        return dialog.exec() == QDialog.DialogCode.Accepted
+        dlg = ConfirmMasterDialog(self, self.session.salt,
+                                  self.session.paths.key_file, action_key)
+        return dlg.exec() == QDialog.DialogCode.Accepted
 
     def _import_records(self):
         if not self._confirm_master("confirm_pw_action_import"):
-            self._show_status(t("status_cancelled"))
-            return
-        path, _ = QFileDialog.getOpenFileName(
-            self, t("dlg_import_title"), "",
-            t("file_csv")
-        )
+            self._show_status(t("status_cancelled")); return
+        path, _ = QFileDialog.getOpenFileName(self, t("dlg_import_title"), "", t("file_csv"))
         if not path:
             return
-        ok, msg = self.storage.import_from_file(path)
-        if ok:
-            self._refresh_table()
-        self._show_status(msg)
+        try:
+            if self._git_sync:
+                ok, msg = self.storage.import_from_file(path)
+                if ok:
+                    threading.Thread(
+                        target=self._git_commit_worker,
+                        args=("nimbus: import",),
+                        daemon=True,
+                    ).start()
+            else:
+                ok, msg = self.storage.import_from_file(path)
+            if ok:
+                self._refresh_table()
+            self._show_status(msg)
+        except Exception as e:
+            self._show_status(t("status_save_failed", e=e))
 
-    def _export_text_records(self):
+    def _export_text(self):
         if not self._confirm_master("confirm_pw_action_export"):
-            self._show_status(t("status_cancelled"))
-            return
-        default_name = t("export_default_filename")
-        path, _ = QFileDialog.getSaveFileName(
-            self, t("dlg_export_title"), default_name, t("file_csv")
-        )
+            self._show_status(t("status_cancelled")); return
+        path, _ = QFileDialog.getSaveFileName(self, t("dlg_export_title"),
+                                              t("export_default_filename"), t("file_csv"))
         if not path:
             return
         ok, msg = self.storage.export_to_file(path)
@@ -3209,14 +3350,10 @@ class MainWindow(QMainWindow):
 
     def _export_archive(self):
         if not self._confirm_master("confirm_pw_action_export"):
-            self._show_status(t("status_cancelled"))
-            return
+            self._show_status(t("status_cancelled")); return
         if not self.session.paths:
-            self._show_status(t("status_cancelled"))
-            return
-        dest = QFileDialog.getExistingDirectory(
-            self, t("dlg_export_archive_title"), ""
-        )
+            self._show_status(t("status_cancelled")); return
+        dest = QFileDialog.getExistingDirectory(self, t("dlg_export_archive_title"), "")
         if not dest:
             return
         ok, msg = self.session.paths.export_to_zip(dest)
@@ -3239,60 +3376,61 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-    def _logout(self, expired: bool = False):
+    def _logout(self, expired=False):
         if expired:
             self._close_open_dialogs()
-        last_username = self.session.username
+        last = self.session.username
+        try:
+            self._sync_timer.stop()
+        except Exception:
+            pass
+        self._git_sync = None
+        self._sync_in_progress = False
+        self._sync_pending = False
+        self._sync_config = None
+        self._sync_last_error = False
+        self._sync_last_error_text = ""
+        if self._sync_indicator:
+            try:
+                self._sync_indicator.set_state(SyncIndicator.STATE_OFF)
+            except RuntimeError:
+                pass
+        self._sync_indicator = None
         self.session.logout()
         self.crypto = None
         self.storage = None
-        if last_username:
-            save_last_user(last_username)
+        if last:
+            save_last_user(last)
         self.login_view.reset()
         if expired:
             self.login_view.show_info("session_expired")
         self.stack.setCurrentIndex(0)
 
-    def _show_status(self, text: str):
+    def _show_status(self, text):
         if hasattr(self, "count_label"):
             self.count_label.setText(text)
             QTimer.singleShot(2500, self._update_count)
 
-
-# ---------------------------------------------------------------------------
-# Точка входа
-# ---------------------------------------------------------------------------
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Nimbus")
     app.setWindowIcon(load_app_icon())
     app.setStyle("Fusion")
-
     theme.set_mode(settings.get("theme", "system"), save=False)
     app.setStyleSheet(build_qss(theme.current()))
-
     nimbus.CLIPBOARD_CLEAR_SECONDS = settings.get("clipboard_timeout", 30)
     nimbus.SESSION_TIMEOUT = settings.get("session_timeout", 300)
-
     if not acquire_single_instance_lock():
-        QMessageBox.warning(
-            None,
-            t("msg_already_running_title"),
-            t("msg_already_running"),
-        )
+        QMessageBox.warning(None, t("msg_already_running_title"), t("msg_already_running"))
         sys.exit(1)
-
     app.setQuitOnLastWindowClosed(False)
     if not QSystemTrayIcon.isSystemTrayAvailable():
-        print("Warning: system tray is not available on this system.")
-
+        print("Warning: system tray is not available.")
     window = MainWindow()
-
     users = nimbus.list_existing_users()
     if "--minimized" not in sys.argv or not users:
         window.show()
-
     sys.exit(app.exec())
 
 
@@ -3301,10 +3439,10 @@ if __name__ == "__main__":
         main()
     except Exception:
         import traceback
-
         with open("nimbus_crash.log", "w", encoding="utf-8") as f:
             traceback.print_exc(file=f)
         try:
-            QMessageBox.critical(None, "Nimbus Error", "Программа упала. Детали в nimbus_crash.log")
+            QMessageBox.critical(None, "Nimbus Error",
+                                 "Программа упала. Детали в nimbus_crash.log")
         except Exception:
             pass
