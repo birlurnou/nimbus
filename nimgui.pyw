@@ -2217,6 +2217,114 @@ class ConfirmMasterDialog(QDialog):
             self.pw_edit.setFocus()
 
 
+
+
+def _make_eye_icon(visible: bool, color: QColor) -> QIcon:
+    try:
+        pix = QPixmap(20, 20)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(color, 1.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QRectF(3.5, 6.0, 13.0, 8.0))
+        p.setBrush(color)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QRectF(8.5, 8.5, 3.0, 3.0))
+        if not visible:
+            p.setPen(QPen(color, 1.4))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawLine(4, 4, 16, 16)          # <-- int'ы, не 3.5/16.5
+        p.end()
+        return QIcon(pix)
+    except Exception as e:
+        print(f"[icon] eye draw error: {e}")
+        return QIcon()
+
+
+def _make_check_icon(ok: bool, color: QColor) -> QIcon:
+    try:
+        pix = QPixmap(20, 20)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(color, 2.2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        if ok:
+            p.drawLine(4, 10, 8, 15)
+            p.drawLine(8, 15, 16, 5)
+        else:
+            p.drawLine(5, 5, 15, 15)
+            p.drawLine(15, 5, 5, 15)
+        p.end()
+        return QIcon(pix)
+    except Exception as e:
+        print(f"[icon] check draw error: {e}")
+        return QIcon()
+
+
+class ValidatedPasswordEdit(QLineEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEchoMode(QLineEdit.EchoMode.Password)
+        self.setMinimumHeight(44)
+        self._state = None
+        self._visible = False
+        self._check_action = None
+        self._eye_action = None
+
+        try:
+            self._check_action = self.addAction(
+                QIcon(), QLineEdit.ActionPosition.TrailingPosition)
+            if self._check_action:
+                self._check_action.setVisible(False)
+
+            self._eye_action = self.addAction(
+                QIcon(), QLineEdit.ActionPosition.TrailingPosition)
+            if self._eye_action:
+                self._eye_action.setCheckable(True)
+                self._eye_action.triggered.connect(self._toggle_eye)
+        except Exception as e:
+            print(f"[ValidatedPasswordEdit] addAction error: {e}")
+
+        theme.subscribe(lambda _: self._refresh_icons())
+        self._refresh_icons()
+
+    def set_state(self, state):
+        if self._state == state:
+            return
+        self._state = state
+        if self._check_action is not None:
+            self._check_action.setVisible(state is not None)
+        self._refresh_icons()
+
+    def _toggle_eye(self, checked):
+        self._visible = bool(checked)
+        self.setEchoMode(
+            QLineEdit.EchoMode.Normal if self._visible else QLineEdit.EchoMode.Password)
+        self._refresh_icons()
+
+    def _refresh_icons(self):
+        try:
+            t_ = theme.current()
+            if self._state is not None and self._check_action is not None:
+                if self._state:
+                    color = (QColor("#16a34a") if t_["name"] == "light"
+                             else QColor("#22c55e"))
+                else:
+                    color = qc(t_["danger"])
+                self._check_action.setIcon(_make_check_icon(self._state, color))
+            if self._eye_action is not None:
+                eye_color = qc(t_["accent"] if self._visible else t_["text_sec"])
+                self._eye_action.setIcon(_make_eye_icon(self._visible, eye_color))
+        except Exception as e:
+            print(f"[ValidatedPasswordEdit] refresh icons: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Change Master pass
 # ---------------------------------------------------------------------------
@@ -2230,7 +2338,7 @@ class ChangeMasterPasswordDialog(QDialog):
         self.new_password = None
         self._step = 1
         self.setWindowTitle(t("change_pw_title"))
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(520)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -2242,70 +2350,37 @@ class ChangeMasterPasswordDialog(QDialog):
         layout.addWidget(self.title_label)
         layout.addSpacing(10)
 
-        # --- old password block ---
+        # --- текущий пароль ---
         self.old_block = QWidget()
         old_lay = QVBoxLayout(self.old_block)
         old_lay.setContentsMargins(0, 0, 0, 0)
         old_lay.setSpacing(10)
         self.lbl_old = QLabel(t("change_pw_current"))
         old_lay.addWidget(self.lbl_old)
-
-        old_row = QHBoxLayout(); old_row.setSpacing(8)
         self.old_pw_edit = QLineEdit()
         self.old_pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.old_pw_edit.setPlaceholderText(t("ph_master"))
         self.old_pw_edit.setMinimumHeight(44)
-        old_row.addWidget(self.old_pw_edit, 1)
-        self.old_show_btn = QPushButton(t("btn_show"))
-        self.old_show_btn.setCheckable(True)
-        self.old_show_btn.setFixedSize(110, 44)
-        self.old_show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.old_show_btn.toggled.connect(
-            lambda c: self._toggle_show(self.old_pw_edit, self.old_show_btn, c))
-        old_row.addWidget(self.old_show_btn)
-        old_lay.addLayout(old_row)
+        old_lay.addWidget(self.old_pw_edit)
         layout.addWidget(self.old_block)
 
-        # --- new password block ---
+        # --- новый пароль ---
         self.new_block = QWidget()
         new_lay = QVBoxLayout(self.new_block)
         new_lay.setContentsMargins(0, 0, 0, 0)
         new_lay.setSpacing(10)
+
         self.lbl_new = QLabel(t("change_pw_new"))
         new_lay.addWidget(self.lbl_new)
-
-        new_row = QHBoxLayout(); new_row.setSpacing(8)
-        self.new_pw_edit = QLineEdit()
-        self.new_pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.new_pw_edit = ValidatedPasswordEdit()
         self.new_pw_edit.setPlaceholderText(t("ph_password_new"))
-        self.new_pw_edit.setMinimumHeight(44)
-        new_row.addWidget(self.new_pw_edit, 1)
-        self.new_show_btn = QPushButton(t("btn_show"))
-        self.new_show_btn.setCheckable(True)
-        self.new_show_btn.setFixedSize(110, 44)
-        self.new_show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.new_show_btn.toggled.connect(
-            lambda c: self._toggle_show(self.new_pw_edit, self.new_show_btn, c))
-        new_row.addWidget(self.new_show_btn)
-        new_lay.addLayout(new_row)
+        new_lay.addWidget(self.new_pw_edit)
 
         self.lbl_confirm = QLabel(t("change_pw_confirm"))
         new_lay.addWidget(self.lbl_confirm)
-
-        confirm_row = QHBoxLayout(); confirm_row.setSpacing(8)
-        self.confirm_edit = QLineEdit()
-        self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm_edit = ValidatedPasswordEdit()
         self.confirm_edit.setPlaceholderText(t("ph_password_confirm"))
-        self.confirm_edit.setMinimumHeight(44)
-        confirm_row.addWidget(self.confirm_edit, 1)
-        self.confirm_show_btn = QPushButton(t("btn_show"))
-        self.confirm_show_btn.setCheckable(True)
-        self.confirm_show_btn.setFixedSize(110, 44)
-        self.confirm_show_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.confirm_show_btn.toggled.connect(
-            lambda c: self._toggle_show(self.confirm_edit, self.confirm_show_btn, c))
-        confirm_row.addWidget(self.confirm_show_btn)
-        new_lay.addLayout(confirm_row)
+        new_lay.addWidget(self.confirm_edit)
 
         self.new_block.setVisible(False)
         layout.addWidget(self.new_block)
@@ -2352,15 +2427,23 @@ class ChangeMasterPasswordDialog(QDialog):
         theme.subscribe(lambda _: self._restyle())
         i18n.subscribe(self._retranslate)
         self._restyle()
+
         self.old_pw_edit.returnPressed.connect(self._on_next)
         self.new_pw_edit.returnPressed.connect(self._on_save)
         self.confirm_edit.returnPressed.connect(self._on_save)
+        self.new_pw_edit.textChanged.connect(self._update_validations)
+        self.confirm_edit.textChanged.connect(self._update_validations)
         self.old_pw_edit.setFocus()
 
-    def _toggle_show(self, edit, btn, checked):
-        edit.setEchoMode(
-            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
-        btn.setText(t("btn_hide") if checked else t("btn_show"))
+    def _update_validations(self):
+        new_text = self.new_pw_edit.text()
+        confirm_text = self.confirm_edit.text()
+        new_ok = len(new_text) >= nimbus.MIN_MASTER_PASSWORD_LEN
+
+        self.new_pw_edit.set_state(None if not new_text else new_ok)
+        self.confirm_edit.set_state(
+            None if not confirm_text
+            else (new_ok and confirm_text == new_text))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -2380,12 +2463,6 @@ class ChangeMasterPasswordDialog(QDialog):
             self.cancel_btn.setText(t("btn_cancel"))
             self.next_btn.setText(t("change_pw_next"))
             self.save_btn.setText(t("btn_save"))
-            self.old_show_btn.setText(
-                t("btn_hide") if self.old_show_btn.isChecked() else t("btn_show"))
-            self.new_show_btn.setText(
-                t("btn_hide") if self.new_show_btn.isChecked() else t("btn_show"))
-            self.confirm_show_btn.setText(
-                t("btn_hide") if self.confirm_show_btn.isChecked() else t("btn_show"))
         except RuntimeError:
             pass
 
@@ -2415,10 +2492,15 @@ class ChangeMasterPasswordDialog(QDialog):
         self._hide_err()
         pw = self.old_pw_edit.text()
         if not pw:
-            self._show_err(t("confirm_pw_need")); return
+            self._show_err(t("confirm_pw_need"));
+            return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             ok = nimbus.verify_master_password(pw, self.salt, self.key_file)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            self._show_err(t("change_pw_err", e=e))
+            return
         finally:
             QApplication.restoreOverrideCursor()
         if not ok:
@@ -2668,7 +2750,6 @@ class SettingsDialog(QDialog):
         if not ok:
             QMessageBox.critical(self, t("title_error"), t("change_pw_err", e=err))
             return
-        QMessageBox.information(self, t("title_settings"), t("change_pw_ok"))
         self.accept()
         QTimer.singleShot(0, lambda: mw._logout(expired=False))
 
