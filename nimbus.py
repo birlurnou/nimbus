@@ -616,12 +616,35 @@ class Storage:
             if not new_records:
                 return False, f'No records imported. Errors: {len(errors)}'
 
-            now = time.time()
+            existing_keys = {
+                (safe_str(r.get('service', '')).lower().strip(),
+                 safe_str(r.get('username', '')).lower().strip())
+                for r in self._raw_data
+                if not r.get('_deleted')
+            }
+
+            filtered = []
+            skipped = 0
+            seen_in_csv = set()
             for r in new_records:
+                key = (r['service'].lower().strip(), r['username'].lower().strip())
+                if key in existing_keys or key in seen_in_csv:
+                    skipped += 1
+                    continue
+                seen_in_csv.add(key)
+                filtered.append(r)
+
+            if not filtered:
+                return False, (
+                    f'No new records (already have {skipped}, errors: {len(errors)})'
+                )
+
+            now = time.time()
+            for r in filtered:
                 r["updated_at"] = now
 
             n_before = len(self._raw_data)
-            self._raw_data.extend(new_records)
+            self._raw_data.extend(filtered)
             self._sync_data()
             try:
                 self._save()
@@ -631,8 +654,8 @@ class Storage:
                 return False, f'Import failed (save): {e}'
 
             return True, (
-                f'Imported {len(new_records)} records. '
-                f'Errors: {len(errors)}'
+                f'Imported {len(filtered)} new records, '
+                f'skipped {skipped} existing. Errors: {len(errors)}'
             )
         except Exception as e:
             return False, f'Import failed: {e}'
