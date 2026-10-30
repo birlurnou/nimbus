@@ -884,14 +884,16 @@ class HoverTableView(QTableView):
         hover_btn = -1
         if index.isValid() and col == 4:
             rect = self.visualRect(index)
-            btn, gap = 34, 8
-            total = btn * 2 + gap
+            btn, gap = 34, 6
+            total = btn * 3 + gap * 2
             sx = rect.center().x() - total // 2
             y = rect.center().y() - btn // 2
             if QRect(sx, y, btn, btn).contains(event.pos()):
                 hover_btn = 0
             elif QRect(sx + btn + gap, y, btn, btn).contains(event.pos()):
                 hover_btn = 1
+            elif QRect(sx + (btn + gap) * 2, y, btn, btn).contains(event.pos()):
+                hover_btn = 2
         changed = False
         if row != self._hover_row or col != self._hover_col:
             self._hover_row, self._hover_col = row, col
@@ -974,41 +976,60 @@ class TileDelegate(QStyledItemDelegate):
     def _paint_actions(self, painter, option, row, is_selected):
         t_ = theme.current()
         rect = option.rect
-        btn, gap = 34, 8
-        total = btn * 2 + gap
+        btn, gap = 34, 6
+        total = btn * 3 + gap * 2
         sx = rect.center().x() - total // 2
         y = rect.center().y() - btn // 2
-        edit_rect = QRect(sx, y, btn, btn)
-        del_rect = QRect(sx + btn + gap, y, btn, btn)
+        copy_rect = QRect(sx, y, btn, btn)
+        edit_rect = QRect(sx + btn + gap, y, btn, btn)
+        del_rect = QRect(sx + (btn + gap) * 2, y, btn, btn)
         hb = self.view.hover_btn if row == self.view.hover_row else -1
+
         if hb == 0:
             key = "icon_hover_bg_on_selected" if is_selected else "icon_hover_bg"
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(qc(t_[key]))
-            painter.drawRoundedRect(edit_rect, 5, 5)
+            painter.drawRoundedRect(copy_rect, 5, 5)
         painter.setPen(qc(t_["accent"] if hb == 0 else t_["text_sec"]))
-        f = painter.font(); f.setPointSize(15); f.setWeight(QFont.Weight.Bold)
+        f = painter.font();
+        f.setPointSize(14);
+        f.setWeight(QFont.Weight.Bold)
+        painter.setFont(f)
+        painter.drawText(copy_rect, int(Qt.AlignmentFlag.AlignCenter), "⧉")
+
+        if hb == 1:
+            key = "icon_hover_bg_on_selected" if is_selected else "icon_hover_bg"
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(qc(t_[key]))
+            painter.drawRoundedRect(edit_rect, 5, 5)
+        painter.setPen(qc(t_["accent"] if hb == 1 else t_["text_sec"]))
+        f.setPointSize(15);
+        f.setWeight(QFont.Weight.Bold)
         painter.setFont(f)
         painter.drawText(edit_rect, int(Qt.AlignmentFlag.AlignCenter), "✎")
-        if hb == 1:
+
+        if hb == 2:
             key = "danger_icon_hover_bg_on_selected" if is_selected else "danger_icon_hover_bg"
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(qc(t_[key]))
             painter.drawRoundedRect(del_rect, 5, 5)
-        painter.setPen(qc(t_["danger"] if hb == 1 else t_["text_sec"]))
+        painter.setPen(qc(t_["danger"] if hb == 2 else t_["text_sec"]))
         painter.drawText(del_rect, int(Qt.AlignmentFlag.AlignCenter), "✕")
 
     def editorEvent(self, event, model, option, index):
         if self.is_action_column and event.type() == event.Type.MouseButtonRelease:
             rect = option.rect
-            btn, gap = 34, 8
-            total = btn * 2 + gap
+            btn, gap = 34, 6
+            total = btn * 3 + gap * 2
             sx = rect.center().x() - total // 2
             y = rect.center().y() - btn // 2
             if QRect(sx, y, btn, btn).contains(event.pos()):
-                if self.on_action: self.on_action("edit", index)
+                if self.on_action: self.on_action("copy", index)
                 return True
             if QRect(sx + btn + gap, y, btn, btn).contains(event.pos()):
+                if self.on_action: self.on_action("edit", index)
+                return True
+            if QRect(sx + (btn + gap) * 2, y, btn, btn).contains(event.pos()):
                 if self.on_action: self.on_action("delete", index)
                 return True
         return super().editorEvent(event, model, option, index)
@@ -3342,10 +3363,25 @@ class MainWindow(QMainWindow):
         if not src.isValid():
             return
         row = src.row()
-        if action == "edit":
+        if action == "copy":
+            self._copy_row_at(row)
+        elif action == "edit":
             self._edit_row(row)
         elif action == "delete":
             self._delete_row(row)
+
+    def _copy_row_at(self, row):
+        rec = self.model.get_record(row)
+        if not rec:
+            return
+        line = ";".join([
+            nimbus.safe_str(rec.get("service", "")),
+            nimbus.safe_str(rec.get("username", "")),
+            nimbus.safe_str(rec.get("password", "")),
+            nimbus.safe_str(rec.get("description", "")),
+        ])
+        nimbus.copy_to_clipboard(line)
+        self._show_status(t("status_copied_row"))
 
     def _copy(self, text, label):
         if not text or text == "—":
