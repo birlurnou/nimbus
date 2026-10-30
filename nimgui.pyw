@@ -3258,6 +3258,10 @@ class MainWindow(QMainWindow):
         self.edit_btn.setMinimumHeight(36)
         self.edit_btn.clicked.connect(self._edit_selected)
         bl.addWidget(self.edit_btn)
+        self.copy_row_btn = QPushButton(t("btn_copy_row"))
+        self.copy_row_btn.setMinimumHeight(36)
+        self.copy_row_btn.clicked.connect(self._copy_selected_row)
+        bl.addWidget(self.copy_row_btn)
         self.copy_btn = QPushButton(t("btn_copy_password"))
         self.copy_btn.setMinimumHeight(36)
         self.copy_btn.clicked.connect(self._copy_selected_pw)
@@ -3388,6 +3392,13 @@ class MainWindow(QMainWindow):
             return
         nimbus.copy_to_clipboard(text)
         self._show_status(t("status_copied", label=label))
+
+    def _copy_selected_row(self):
+        row = self._selected_row()
+        if row is None:
+            self._show_status(t("status_select"))
+            return
+        self._copy_row_at(row)
 
     def _copy_selected_pw(self):
         rec = self._selected_record()
