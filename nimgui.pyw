@@ -3181,6 +3181,12 @@ class MainWindow(QMainWindow):
         self._export_archive_btn.setMinimumHeight(38)
         self._export_archive_btn.clicked.connect(self._export_archive)
         al.addWidget(self._export_archive_btn)
+        self._delete_all_btn = QPushButton(t("btn_delete_all"))
+        self._delete_all_btn.setObjectName("danger")
+        self._delete_all_btn.setMinimumHeight(38)
+        self._delete_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._delete_all_btn.clicked.connect(self._delete_all)
+        al.addWidget(self._delete_all_btn)
         al.addStretch()
         self.count_label = QLabel("")
         self.count_label.setStyleSheet(f"color: {t_['text_muted']}; font-size: 18px; background: transparent;")
@@ -3270,6 +3276,26 @@ class MainWindow(QMainWindow):
         self.edit_btn.setEnabled(has)
         self.copy_btn.setEnabled(has)
         self.delete_btn.setEnabled(has)
+
+    def _delete_all(self):
+        if not self.storage:
+            return
+        n = len(self.storage.get_all())
+        if n == 0:
+            self._show_status(t("count_empty"))
+            return
+        dlg = MessageDialog(self, t("confirm_delete_all_title"),
+                            t("confirm_delete_all_msg", n=n), kind="danger",
+                            confirm_text=t("btn_delete"), cancel_text=t("btn_cancel"))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self._persist_mutation(self.storage.delete_all, "nimbus: delete all")
+        except Exception as e:
+            QMessageBox.critical(self, t("title_error"), t("status_save_failed", e=e))
+            return
+        self._refresh_table()
+        self._show_status(t("status_deleted_all", n=n))
 
     def _on_search(self, text):
         self.proxy.set_filter_text(text); self._update_count(); self._update_action_btns()
