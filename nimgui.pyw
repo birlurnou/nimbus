@@ -990,7 +990,8 @@ class TileDelegate(QStyledItemDelegate):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(qc(t_[key]))
             painter.drawRoundedRect(copy_rect, 5, 5)
-        painter.setPen(qc(t_["accent"] if hb == 0 else t_["text_sec"]))
+        green = QColor("#16a34a") if t_["name"] == "light" else QColor("#22c55e")
+        painter.setPen(green if hb == 0 else qc(t_["text_sec"]))
         f = painter.font();
         f.setPointSize(14);
         f.setWeight(QFont.Weight.Bold)
@@ -1912,6 +1913,8 @@ class RecordDialog(QDialog):
         lbl = QLabel(t("field_login")); self._form_labels.append((lbl, "field_login"))
         form.addRow(lbl, self.username_edit)
 
+        self._pw_hide_generation = 0
+
         pw_layout = QHBoxLayout()
         pw_layout.setSpacing(8)
         self.password_edit = QLineEdit(self.record.get("password", ""))
@@ -2000,6 +2003,7 @@ class RecordDialog(QDialog):
             pass
 
     def _toggle_pw_visibility(self, checked):
+        self._pw_hide_generation += 1
         self.password_edit.setEchoMode(
             QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password)
         self.show_pw_btn.setText(t("btn_hide") if checked else t("btn_show"))
@@ -2008,10 +2012,22 @@ class RecordDialog(QDialog):
         pw = nimbus.generate_password(settings.get("password_length", 18))
         self.password_edit.setText(pw)
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+        self.show_pw_btn.blockSignals(True)
         self.show_pw_btn.setChecked(True)
-        QTimer.singleShot(3000, lambda: (
-            self.password_edit.setEchoMode(QLineEdit.EchoMode.Password),
-            self.show_pw_btn.setChecked(False)))
+        self.show_pw_btn.setText(t("btn_hide"))
+        self.show_pw_btn.blockSignals(False)
+        self._pw_hide_generation += 1
+        gen = self._pw_hide_generation
+        QTimer.singleShot(4000, lambda: self._auto_hide_pw(gen))
+
+    def _auto_hide_pw(self, gen):
+        if gen != self._pw_hide_generation:
+            return
+        try:
+            self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self.show_pw_btn.setChecked(False)
+        except RuntimeError:
+            pass
 
     def _validate_and_accept(self):
         if not self.service_edit.text().strip():
@@ -2214,71 +2230,78 @@ class ChangeMasterPasswordDialog(QDialog):
         self.new_password = None
         self._step = 1
         self.setWindowTitle(t("change_pw_title"))
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(520)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(32, 28, 32, 26)
+        layout.setSpacing(14)
+        layout.setContentsMargins(36, 30, 36, 28)
 
         self.title_label = QLabel(t("change_pw_title"))
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title_label)
-        layout.addSpacing(8)
+        layout.addSpacing(10)
 
-        self.lbl_old = QLabel(t("change_pw_current")); layout.addWidget(self.lbl_old)
+        self.old_block = QWidget()
+        old_lay = QVBoxLayout(self.old_block)
+        old_lay.setContentsMargins(0, 0, 0, 0)
+        old_lay.setSpacing(10)
+        self.lbl_old = QLabel(t("change_pw_current"))
+        old_lay.addWidget(self.lbl_old)
         self.old_pw_edit = QLineEdit()
         self.old_pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.old_pw_edit.setPlaceholderText(t("ph_master"))
         self.old_pw_edit.setMinimumHeight(44)
-        self.old_pw_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.old_pw_edit)
+        old_lay.addWidget(self.old_pw_edit)
+        layout.addWidget(self.old_block)
 
-        self.lbl_new = QLabel(t("change_pw_new")); layout.addWidget(self.lbl_new)
+        self.new_block = QWidget()
+        new_lay = QVBoxLayout(self.new_block)
+        new_lay.setContentsMargins(0, 0, 0, 0)
+        new_lay.setSpacing(10)
+        self.lbl_new = QLabel(t("change_pw_new"))
+        new_lay.addWidget(self.lbl_new)
         self.new_pw_edit = QLineEdit()
         self.new_pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.new_pw_edit.setPlaceholderText(t("ph_password_new"))
         self.new_pw_edit.setMinimumHeight(44)
-        self.new_pw_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.new_pw_edit)
-
-        self.lbl_confirm = QLabel(t("change_pw_confirm")); layout.addWidget(self.lbl_confirm)
+        new_lay.addWidget(self.new_pw_edit)
+        self.lbl_confirm = QLabel(t("change_pw_confirm"))
+        new_lay.addWidget(self.lbl_confirm)
         self.confirm_edit = QLineEdit()
         self.confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.confirm_edit.setPlaceholderText(t("ph_password_confirm"))
         self.confirm_edit.setMinimumHeight(44)
-        self.confirm_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.confirm_edit)
-
-        for w in (self.lbl_new, self.new_pw_edit, self.lbl_confirm, self.confirm_edit):
-            w.setVisible(False)
+        new_lay.addWidget(self.confirm_edit)
+        self.new_block.setVisible(False)
+        layout.addWidget(self.new_block)
 
         self.err_label = QLabel("")
         self.err_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.err_label.setWordWrap(True)
         self.err_label.setVisible(False)
         layout.addWidget(self.err_label)
+        layout.addSpacing(8)
 
-        btn_row = QHBoxLayout(); btn_row.setSpacing(14); btn_row.addStretch(1)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(14)
+        btn_row.addStretch(1)
         self.cancel_btn = QPushButton(t("btn_cancel"))
-        self.cancel_btn.setFixedSize(160, 44)
+        self.cancel_btn.setFixedSize(180, 44)
         self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self.cancel_btn)
-
         self.next_btn = QPushButton(t("change_pw_next"))
-        self.next_btn.setFixedSize(160, 44)
+        self.next_btn.setFixedSize(180, 44)
         self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.next_btn.clicked.connect(self._on_next)
         btn_row.addWidget(self.next_btn)
-
         self.save_btn = QPushButton(t("btn_save"))
-        self.save_btn.setFixedSize(160, 44)
+        self.save_btn.setFixedSize(180, 44)
         self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.save_btn.clicked.connect(self._on_save)
         self.save_btn.setVisible(False)
         btn_row.addWidget(self.save_btn)
-
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 
@@ -2317,6 +2340,9 @@ class ChangeMasterPasswordDialog(QDialog):
             self.setStyleSheet(build_qss(t_))
             self.title_label.setStyleSheet(
                 f"font-size: 20px; font-weight: 700; color: {t_['text']}; background: transparent;")
+            for lbl in (self.lbl_old, self.lbl_new, self.lbl_confirm):
+                lbl.setStyleSheet(
+                    f"font-size: 14px; color: {t_['text_sec']}; background: transparent;")
             self.err_label.setStyleSheet(
                 f"font-size: 14px; color: {t_['danger']}; background: transparent; padding: 4px;")
             self.save_btn.setStyleSheet(primary_btn_qss(t_))
@@ -2342,11 +2368,10 @@ class ChangeMasterPasswordDialog(QDialog):
             return
         self.old_password = pw
         self._step = 2
-        self.lbl_old.setVisible(False); self.old_pw_edit.setVisible(False)
+        self.old_block.setVisible(False)
         self.next_btn.setVisible(False)
-        for w in (self.lbl_new, self.new_pw_edit, self.lbl_confirm,
-                  self.confirm_edit, self.save_btn):
-            w.setVisible(True)
+        self.new_block.setVisible(True)
+        self.save_btn.setVisible(True)
         self.adjustSize()
         self.new_pw_edit.setFocus()
 
@@ -2364,9 +2389,6 @@ class ChangeMasterPasswordDialog(QDialog):
             self._show_err(t("login_mismatch")); return
         self.new_password = new_pw
         self.accept()
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -2556,9 +2578,9 @@ class SettingsDialog(QDialog):
 
         self.change_pw_btn = QPushButton(t("btn_change_master"))
         self.change_pw_btn.setObjectName("danger")
-        self.change_pw_btn.setMinimumHeight(46)
+        self.change_pw_btn.setMinimumHeight(40)
+        self.change_pw_btn.setMinimumWidth(220)
         self.change_pw_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.change_pw_btn.setStyleSheet(danger_btn_qss(theme.current()))
         self.change_pw_btn.clicked.connect(self._change_master_password)
         v.addWidget(self.change_pw_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
@@ -2583,43 +2605,8 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, t("title_error"), t("change_pw_err", e=err))
             return
         QMessageBox.information(self, t("title_settings"), t("change_pw_ok"))
-
-    def _do_change_master_password(self, old_pw, new_pw):
-        try:
-            paths = self.session.paths
-            salt = nimbus.load_or_create_salt(paths.salt_file)
-            iterations = nimbus.get_kdf_iterations(paths.meta_file)
-
-            if not nimbus.verify_master_password(old_pw, salt, paths.key_file):
-                return False, "wrong_old_password"
-
-            old_crypto = nimbus.EncryptionManager(old_pw, salt, iterations=iterations)
-            old_storage = nimbus.Storage(old_crypto, paths.data_file)
-            raw_data = list(old_storage._raw_data)
-
-            new_crypto = nimbus.EncryptionManager(new_pw, salt, iterations=iterations)
-
-            new_storage = nimbus.Storage(new_crypto, paths.data_file)
-            new_storage._raw_data = raw_data
-            new_storage._sync_data()
-            new_storage._save()
-
-            nimbus.save_key_file(paths.key_file, new_crypto.encrypt(new_pw))
-
-            self.crypto = new_crypto
-            self.storage = new_storage
-            self.session.crypto = new_crypto
-            self.session.storage = new_storage
-
-            if self._git_sync:
-                threading.Thread(
-                    target=self._git_commit_worker,
-                    args=("nimbus: change master password",),
-                    daemon=True,
-                ).start()
-            return True, None
-        except Exception as e:
-            return False, str(e)
+        self.accept()
+        QTimer.singleShot(0, lambda: mw._logout(expired=False))
 
     def _build_github_tab(self):
         w, v = self._tab_container()
@@ -3061,6 +3048,13 @@ class MainWindow(QMainWindow):
                   QEvent.Type.MouseMove, QEvent.Type.KeyPress, QEvent.Type.KeyRelease,
                   QEvent.Type.Wheel, QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate):
             self._touch()
+        if et == QEvent.Type.MouseButtonPress:
+            try:
+                if hasattr(self, "search_edit") and self.search_edit.hasFocus():
+                    if obj is not self.search_edit and not isinstance(obj, QLineEdit):
+                        self.search_edit.clearFocus()
+            except RuntimeError:
+                pass
         return super().eventFilter(obj, event)
 
     def showEvent(self, e):
@@ -3187,7 +3181,8 @@ class MainWindow(QMainWindow):
                           ("_export_text_btn", "btn_export_text"),
                           ("_export_archive_btn", "btn_export_archive"),
                           ("edit_btn", "btn_edit"), ("copy_btn", "btn_copy_password"),
-                          ("delete_btn", "btn_delete")]:
+                          ("delete_btn", "btn_delete"), ("_delete_all_btn", "btn_delete_all"),
+                          ("copy_row_btn", "btn_copy_row"),]:
             w = getattr(self, attr, None)
             if w is None:
                 continue
@@ -3337,6 +3332,39 @@ class MainWindow(QMainWindow):
                 daemon=True,
             ).start()
 
+    def _do_change_master_password(self, old_pw, new_pw):
+        try:
+            paths = self.session.paths
+            salt = nimbus.load_or_create_salt(paths.salt_file)
+            iterations = nimbus.get_kdf_iterations(paths.meta_file)
+
+            if not nimbus.verify_master_password(old_pw, salt, paths.key_file):
+                return False, "wrong_old_password"
+
+            old_crypto = nimbus.EncryptionManager(old_pw, salt, iterations=iterations)
+            old_storage = nimbus.Storage(old_crypto, paths.data_file)
+            raw_data = list(old_storage._raw_data)
+
+            new_crypto = nimbus.EncryptionManager(new_pw, salt, iterations=iterations)
+            new_storage = nimbus.Storage(new_crypto, paths.data_file)
+            new_storage._raw_data = raw_data
+            new_storage._sync_data()
+            new_storage._save()
+
+            nimbus.save_key_file(paths.key_file, new_crypto.encrypt(new_pw))
+
+            if self._git_sync:
+                try:
+                    self._git_sync.do_and_commit(
+                        lambda: None, "nimbus: change master password"
+                    )
+                except Exception as e:
+                    print(f"[sync] commit after pw change: {e}")
+
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
     def _git_commit_worker(self, message):
         try:
             self._git_sync.do_and_commit(lambda: None, message)
@@ -3477,7 +3505,7 @@ class MainWindow(QMainWindow):
         header.resizeSection(2, 160)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        header.resizeSection(4, 100)
+        header.resizeSection(4, 130)
         header.setHighlightSections(False)
         td = TileDelegate(self.table)
         for col in (0, 1, 2, 3):
@@ -3539,6 +3567,8 @@ class MainWindow(QMainWindow):
             return
         has = self._selected_row() is not None
         self.edit_btn.setEnabled(has)
+        if hasattr(self, "copy_row_btn"):
+            self.copy_row_btn.setEnabled(has)
         self.copy_btn.setEnabled(has)
         self.delete_btn.setEnabled(has)
 
