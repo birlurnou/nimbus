@@ -221,24 +221,35 @@ class GitSync:
     # --- repo init ---
 
     def _write_gitignore(self):
-        users = {self.username}
+        path = os.path.join(self.repo_dir, ".gitignore")
+        user_line = f"!/{self.username}/"
 
-        lines = [
-            "# Nimbus sync",
-            "/*",
-            "!/.gitignore",
-            "!/README.md",
-        ]
-        for u in sorted(users):
-            lines.append(f"!/{u}/")
-        lines.extend([
-            "",
-            "# Never sync these (machine-specific)",
-            "*.lock",
-            ".nimbus_sync_state.json",
-        ])
-        with open(os.path.join(self.repo_dir, ".gitignore"),
-                  "w", encoding="utf-8") as f:
+        existing = ""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                existing = f.read()
+        except Exception:
+            pass
+
+        lines = [l for l in existing.splitlines() if l.strip()]
+
+        # базовые правила, если ещё нет
+        if "/*" not in lines:
+            lines = [
+                        "# Nimbus sync",
+                        "/*",
+                        "!/.gitignore",
+                        "!/README.md",
+                    ] + lines
+
+        for pat in ("*.lock", "*.nimbus_settings", ".nimbus_sync_state.json"):
+            if pat not in lines:
+                lines.append(pat)
+
+        if user_line not in lines:
+            lines.append(user_line)
+
+        with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
     def _write_readme(self):
