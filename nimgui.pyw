@@ -164,6 +164,12 @@ STRINGS = {
     "session_expired": {"ru": "Сессия истекла из-за неактивности", "en": "Session expired due to inactivity"},
     "btn_new_user_tip": {"ru": "Новый пользователь", "en": "New user"},
 
+    "field_username_in_repo": {"ru": "Имя пользователя в репозитории", "en": "Username in repository"},
+    "ph_username_in_repo": {"ru": "например, alice", "en": "e.g. alice"},
+    "btn_change_user": {"ru": "Сменить пользователя", "en": "Change user"},
+    "login_need_login": {"ru": "Введите логин", "en": "Login required"},
+    "login_user_not_found": {"ru": "Пользователь «{name}» не найден", "en": "User «{name}» not found"},
+
     "title_register": {"ru": "Создание пользователя", "en": "Create user"},
     "title_restore": {"ru": "Восстановить с GitHub", "en": "Restore from GitHub"},
     "field_username": {"ru": "Логин", "en": "Login"},
@@ -1570,7 +1576,10 @@ class LoginView(QWidget):
         if dlg.restore_mode and dlg.github_url:
             try:
                 username = nimbus_sync.clone_from_github(
-                    dlg.github_url, _SCRIPT_DIR, token=dlg.github_token or None)
+                    dlg.github_url, _SCRIPT_DIR,
+                    token=dlg.github_token or None,
+                    username=dlg.github_username or None,
+                )
             except Exception as e:
                 self.show_text(t("status_sync_err", e=e), theme.current()["danger"])
                 return
@@ -1582,6 +1591,8 @@ class LoginView(QWidget):
             if dlg.github_token:
                 s["github_token"] = dlg.github_token
             save_settings(paths.settings_file, s)
+            save_last_user(username)
+            self._apply_mode()
             self.show_text(t("restore_ok", name=username), theme.current()["accent"])
             return
         if dlg.username:
@@ -1666,6 +1677,7 @@ class RegisterDialog(QDialog):
         self.restore_mode = False
         self.github_url = None
         self.github_token = None
+        self.github_username = None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -1754,16 +1766,25 @@ class RegisterDialog(QDialog):
 
     def _on_mode_changed(self, value):
         self.restore_mode = (value == "restore")
-        show_new = not self.restore_mode
-        for w in (self.lbl_username, self.username_edit,
-                  self.lbl_pw, self.password_edit,
-                  self.lbl_pw_confirm, self.confirm_edit):
-            w.setVisible(show_new)
         if self.restore_mode:
+            self.lbl_username.setVisible(True)
+            self.username_edit.setVisible(True)
+            self.lbl_username.setText(t("field_username_in_repo"))
+            self.username_edit.setPlaceholderText(t("ph_username_in_repo"))
+            for w in (self.lbl_pw, self.password_edit,
+                      self.lbl_pw_confirm, self.confirm_edit):
+                w.setVisible(False)
             self.setWindowTitle(t("title_restore"))
             self.title_label.setText(t("title_restore"))
             self.create_btn.setText(t("btn_restore"))
         else:
+            self.lbl_username.setVisible(True)
+            self.username_edit.setVisible(True)
+            self.lbl_username.setText(t("field_username"))
+            self.username_edit.setPlaceholderText(t("ph_username"))
+            for w in (self.lbl_pw, self.password_edit,
+                      self.lbl_pw_confirm, self.confirm_edit):
+                w.setVisible(True)
             self.setWindowTitle(t("title_register"))
             self.title_label.setText(t("title_register"))
             self.create_btn.setText(t("btn_create"))
@@ -1772,13 +1793,11 @@ class RegisterDialog(QDialog):
     def _retranslate(self):
         try:
             if self.restore_mode:
-                self.setWindowTitle(t("title_restore"))
-                self.title_label.setText(t("title_restore"))
-                self.create_btn.setText(t("btn_restore"))
+                self.lbl_username.setText(t("field_username_in_repo"))
+                self.username_edit.setPlaceholderText(t("ph_username_in_repo"))
             else:
-                self.setWindowTitle(t("title_register"))
-                self.title_label.setText(t("title_register"))
-                self.create_btn.setText(t("btn_create"))
+                self.lbl_username.setText(t("field_username"))
+                self.username_edit.setPlaceholderText(t("ph_username"))
             self.lbl_username.setText(t("field_username"))
             self.lbl_pw.setText(t("field_password"))
             self.lbl_pw_confirm.setText(t("field_password_confirm"))
@@ -1829,14 +1848,23 @@ class RegisterDialog(QDialog):
         if self.restore_mode:
             url = self.github_edit.text().strip()
             token = self.github_token_edit.text().strip()
+            username = self.username_edit.text().strip()
             if not url:
-                self._show_err("reg_err_no_url"); return
+                self._show_err("reg_err_no_url");
+                return
             if not url.lower().startswith("https://"):
-                self._show_err(text="URL должен начинаться с https://"); return
+                self._show_err(text="URL должен начинаться с https://");
+                return
             if not token:
-                self._show_err(text="Personal Access Token обязателен"); return
+                self._show_err(text="Personal Access Token обязателен");
+                return
+            err = nimbus.validate_username(username)
+            if err:
+                self._show_err(f"reg_err_{err}");
+                return
             self.github_url = url
             self.github_token = token
+            self.github_username = username
             self.accept()
             return
         username = self.username_edit.text().strip()
@@ -3167,7 +3195,10 @@ class MainWindow(QMainWindow):
         if dlg.restore_mode and dlg.github_url:
             try:
                 username = nimbus_sync.clone_from_github(
-                    dlg.github_url, _SCRIPT_DIR, token=dlg.github_token or None)
+                    dlg.github_url, _SCRIPT_DIR,
+                    token=dlg.github_token or None,
+                    username=dlg.github_username or None,
+                )
             except Exception as e:
                 self.login_view.show_text(t("status_sync_err", e=e),
                                           theme.current()["danger"])
@@ -3180,6 +3211,8 @@ class MainWindow(QMainWindow):
             if dlg.github_token:
                 s["github_token"] = dlg.github_token
             save_settings(paths.settings_file, s)
+            save_last_user(username)
+            self.login_view._apply_mode()
             self.login_view.show_text(t("restore_ok", name=username),
                                       theme.current()["accent"])
             return

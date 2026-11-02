@@ -446,7 +446,8 @@ class GitSync:
 
 def clone_from_github(url: str, base_dir: str = ".",
                       branch: str = "main",
-                      token: Optional[str] = None) -> str:
+                      token: Optional[str] = None,
+                      username: Optional[str] = None) -> str:
     if not token:
         raise SyncError("Personal Access Token обязателен")
     if not url.lower().startswith("https://"):
@@ -463,22 +464,32 @@ def clone_from_github(url: str, base_dir: str = ".",
             msg = _sanitize((err or out).strip(), token)
             raise SyncError(f"git clone failed: {msg[:300]}")
 
-        candidates = []
-        for name in os.listdir(tmp):
-            if name in (".git", ".gitignore", "README.md"):
-                continue
-            p = os.path.join(tmp, name)
-            if os.path.isdir(p):
-                try:
-                    if any(f.endswith(".nimbus_key") for f in os.listdir(p)):
-                        candidates.append(name)
-                except Exception:
-                    pass
-
-        if not candidates:
-            raise SyncError("В репозитории нет папки с *.nimbus_key")
-        if len(candidates) > 1:
-            raise SyncError(f"Несколько пользователей: {', '.join(candidates)}")
+        if username:
+            src = os.path.join(tmp, username)
+            if not os.path.isdir(src):
+                raise SyncError(f"Папка «{username}» не найдена в репозитории")
+            if not any(f.endswith(".nimbus_key") for f in os.listdir(src)):
+                raise SyncError(f"В папке «{username}» нет *.nimbus_key")
+            candidates = [username]
+        else:
+            candidates = []
+            for name in os.listdir(tmp):
+                if name in (".git", ".gitignore", "README.md"):
+                    continue
+                p = os.path.join(tmp, name)
+                if os.path.isdir(p):
+                    try:
+                        if any(f.endswith(".nimbus_key") for f in os.listdir(p)):
+                            candidates.append(name)
+                    except Exception:
+                        pass
+            if not candidates:
+                raise SyncError("В репозитории нет папки с *.nimbus_key")
+            if len(candidates) > 1:
+                raise SyncError(
+                    f"Несколько пользователей: {', '.join(candidates)}. "
+                    f"Укажите имя пользователя явно."
+                )
 
         username = candidates[0]
         target = os.path.join(base_dir, username)
