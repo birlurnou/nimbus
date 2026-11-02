@@ -20,7 +20,8 @@ from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QButtonGroup, QMessageBox,
     QFileDialog, QTableView, QSystemTrayIcon, QMenu,
     QAbstractItemView, QStyledItemDelegate, QStyle,
-    QHeaderView, QStackedWidget, QTabWidget, QPlainTextEdit
+    QHeaderView, QStackedWidget, QTabWidget, QPlainTextEdit,
+    QTableWidget, QTableWidgetItem
 )
 
 import nimbus
@@ -284,6 +285,27 @@ STRINGS = {
     "status_load_failed": {"ru": "Не удалось прочитать: {e}", "en": "Failed to load: {e}"},
     "status_sync_busy": {"ru": "Идёт синхронизация, попробуйте через секунду", "en": "Sync in progress, try again in a moment"},
     "status_sync_err": {"ru": "Синхронизация: {e}", "en": "Sync: {e}"},
+
+    "btn_restore_backup": {"ru": "Восстановить из бекапа", "en": "Restore from backup"},
+    "title_restore_backup": {"ru": "Восстановить из бекапа", "en": "Restore from backup"},
+    "backup_col_time": {"ru": "ДАТА / ВРЕМЯ", "en": "DATE / TIME"},
+    "backup_col_action": {"ru": "ДЕЙСТВИЕ", "en": "ACTION"},
+    "backup_empty": {"ru": "Бекапов пока нет", "en": "No backups yet"},
+    "backup_action_initial": {"ru": "создание пользователя", "en": "user created"},
+    "backup_action_add": {"ru": "добавление", "en": "add"},
+    "backup_action_update": {"ru": "изменение", "en": "edit"},
+    "backup_action_delete": {"ru": "удаление", "en": "delete"},
+    "backup_action_delete_all": {"ru": "удаление всего", "en": "delete all"},
+    "backup_action_import": {"ru": "импорт", "en": "import"},
+    "backup_action_chpw": {"ru": "смена мастер-пароля", "en": "master pw change"},
+    "backup_action_change": {"ru": "изменение", "en": "change"},
+    "backup_action_restore": {"ru": "восстановление из бекапа", "en": "restore from backup"},
+    "backup_confirm_title": {"ru": "Восстановить из бекапа?",
+                             "en": "Restore from backup?"},
+    "backup_confirm_msg": {"ru": "Текущие данные будут заменены выбранным бекапом.\n\n{filename}\n\nПродолжить?",
+                           "en": "Current data will be replaced by the selected backup.\n\n{filename}\n\nContinue?"},
+    "status_backup_restored": {"ru": "Данные восстановлены из бекапа",
+                               "en": "Restored from backup"},
 
     "col_service": {"ru": "СЕРВИС", "en": "SERVICE"},
     "col_login": {"ru": "ЛОГИН", "en": "LOGIN"},
@@ -2029,6 +2051,10 @@ class RegisterDialog(QDialog):
             storage = nimbus.Storage(crypto, paths.data_file)
             storage._save()
             try:
+                paths.backup_data_file("initial")
+            except Exception as e:
+                print(f"[backup] initial: {e}")
+            try:
                 user_settings = dict(DEFAULT_SETTINGS)
                 url = self.github_edit.text().strip()
                 if url:
@@ -2047,6 +2073,162 @@ class RegisterDialog(QDialog):
         except Exception as e:
             self._show_err(text=t("reg_err_generic", e=e))
 
+
+class RestoreBackupDialog(QDialog):
+    def __init__(self, parent, paths):
+        super().__init__(parent)
+        self.paths = paths
+        self.selected_filename = None
+        self._backups = paths.list_backups()
+
+        self.setWindowTitle(t("title_restore_backup"))
+        self.setMinimumSize(620, 480)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(28, 24, 28, 22)
+
+        self.title_label = QLabel(t("title_restore_backup"))
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.title_label)
+
+        self.table = QTableWidget(0, 2, self)
+        self.table.setHorizontalHeaderLabels([
+            t("backup_col_time"),
+            t("backup_col_action"),
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setShowGrid(False)
+        self.table.itemSelectionChanged.connect(
+            self._on_selection_changed)
+        layout.addWidget(self.table, 1)
+
+        self.empty_label = QLabel(t("backup_empty"))
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setVisible(not self._backups)
+        layout.addWidget(self.empty_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(14)
+        btn_row.addStretch(1)
+        self.cancel_btn = QPushButton(t("btn_cancel"))
+        self.cancel_btn.setFixedSize(160, 44)
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.cancel_btn)
+        self.restore_btn = QPushButton(t("btn_restore"))
+        self.restore_btn.setFixedSize(160, 44)
+        self.restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.restore_btn.setEnabled(False)
+        self.restore_btn.clicked.connect(self._on_restore)
+        btn_row.addWidget(self.restore_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        self._fill_table()
+
+        theme.subscribe(lambda _: self._restyle())
+        i18n.subscribe(self._retranslate)
+        self._restyle()
+
+    @staticmethod
+    def _action_label(action):
+        m = {
+            "initial": "backup_action_initial",
+            "add": "backup_action_add",
+            "update": "backup_action_update",
+            "delete": "backup_action_delete",
+            "delete_all": "backup_action_delete_all",
+            "import": "backup_action_import",
+            "chpw": "backup_action_chpw",
+            "restorebackup": "backup_action_restore",
+        }
+        return t(m.get(action, "backup_action_change"))
+
+    def _fill_table(self):
+        self.table.setRowCount(len(self._backups))
+        for i, b in enumerate(self._backups):
+            ts_str = time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(b["mtime"]))
+            item_t = QTableWidgetItem(ts_str)
+            item_t.setData(Qt.ItemDataRole.UserRole, b["filename"])
+            item_t.setData(Qt.ItemDataRole.UserRole + 1, b["action"])
+            item_a = QTableWidgetItem(self._action_label(b["action"]))
+            self.table.setItem(i, 0, item_t)
+            self.table.setItem(i, 1, item_a)
+
+    def _on_selection_changed(self):
+        try:
+            rows = self.table.selectionModel().selectedRows()
+            self.restore_btn.setEnabled(bool(rows))
+        except RuntimeError:
+            pass
+
+    def _on_restore(self):
+        try:
+            rows = self.table.selectionModel().selectedRows()
+            if not rows:
+                return
+            row = rows[0].row()
+            item = self.table.item(row, 0)
+            if not item:
+                return
+            filename = item.data(Qt.ItemDataRole.UserRole)
+            if not filename:
+                return
+        except RuntimeError:
+            return
+        dlg = MessageDialog(
+            self, t("backup_confirm_title"),
+            t("backup_confirm_msg", filename=filename),
+            kind="danger",
+            confirm_text=t("btn_confirm"),
+            cancel_text=t("btn_cancel"),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.selected_filename = filename
+        self.accept()
+
+    def _retranslate(self):
+        try:
+            self.setWindowTitle(t("title_restore_backup"))
+            self.title_label.setText(t("title_restore_backup"))
+            self.table.setHorizontalHeaderLabels([
+                t("backup_col_time"),
+                t("backup_col_action"),
+            ])
+            self.empty_label.setText(t("backup_empty"))
+            self.cancel_btn.setText(t("btn_cancel"))
+            self.restore_btn.setText(t("btn_restore"))
+            self._fill_table()
+        except RuntimeError:
+            pass
+
+    def _restyle(self):
+        try:
+            t_ = theme.current()
+            self.setStyleSheet(build_qss(t_))
+            self.title_label.setStyleSheet(
+                f"font-size: 22px; font-weight: 700; color: {t_['text']}; "
+                f"background: transparent;")
+            self.empty_label.setStyleSheet(
+                f"color: {t_['text_muted']}; font-size: 14px; "
+                f"background: transparent;")
+            self.restore_btn.setStyleSheet(primary_btn_qss(t_))
+        except RuntimeError:
+            pass
 
 # ---------------------------------------------------------------------------
 # RecordDialog
@@ -3502,7 +3684,8 @@ class MainWindow(QMainWindow):
                           ("_export_archive_btn", "btn_export_archive"),
                           ("edit_btn", "btn_edit"), ("copy_btn", "btn_copy_password"),
                           ("delete_btn", "btn_delete"), ("_delete_all_btn", "btn_delete_all"),
-                          ("copy_row_btn", "btn_copy_row"),]:
+                          ("copy_row_btn", "btn_copy_row"),
+                          ("_restore_backup_btn", "btn_restore_backup"), ]:
             w = getattr(self, attr, None)
             if w is None:
                 continue
@@ -3643,8 +3826,29 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"[sync] reload: {e}")
 
+    @staticmethod
+    def _action_from_message(message):
+        m = {
+            "nimbus: add": "add",
+            "nimbus: update": "update",
+            "nimbus: delete": "delete",
+            "nimbus: delete all": "delete_all",
+            "nimbus: import": "import",
+            "nimbus: change master password": "chpw",
+            "nimbus: restore backup": "restorebackup",
+        }
+        return m.get(message, "change")
+
+    def _backup(self, action):
+        try:
+            if self.session.paths:
+                self.session.paths.backup_data_file(action)
+        except Exception as e:
+            print(f"[backup] {e}")
+
     def _persist_mutation(self, fn, message):
         fn()
+        self._backup(self._action_from_message(message))
         if self._git_sync:
             threading.Thread(
                 target=self._git_commit_worker,
@@ -3682,6 +3886,10 @@ class MainWindow(QMainWindow):
             new_storage._save()
 
             nimbus.save_key_file(paths.key_file, new_crypto.encrypt(new_pw))
+            try:
+                paths.backup_data_file("chpw")
+            except Exception as e:
+                print(f"[backup] chpw: {e}")
 
             if self._git_sync:
                 try:
@@ -3800,6 +4008,11 @@ class MainWindow(QMainWindow):
         self._export_archive_btn.setMinimumHeight(38)
         self._export_archive_btn.clicked.connect(self._export_archive)
         al.addWidget(self._export_archive_btn)
+        self._restore_backup_btn = QPushButton(t("btn_restore_backup"))
+        self._restore_backup_btn.setMinimumHeight(38)
+        self._restore_backup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._restore_backup_btn.clicked.connect(self._restore_backup_dialog)
+        al.addWidget(self._restore_backup_btn)
         self._delete_all_btn = QPushButton(t("btn_delete_all"))
         self._delete_all_btn.setObjectName("danger")
         self._delete_all_btn.setMinimumHeight(38)
@@ -4090,6 +4303,7 @@ class MainWindow(QMainWindow):
             else:
                 ok, msg = self.storage.import_from_file(path)
             if ok:
+                self._backup("import")
                 self._refresh_table()
             self._show_status(msg)
         except Exception as e:
@@ -4104,6 +4318,40 @@ class MainWindow(QMainWindow):
             return
         ok, msg = self.storage.export_to_file(path)
         self._show_status(msg)
+
+    def _restore_backup_dialog(self):
+        if not self.session.paths:
+            return
+        dlg = RestoreBackupDialog(self, self.session.paths)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not dlg.selected_filename:
+            return
+        ok, err = self.session.paths.restore_backup(
+            dlg.selected_filename, crypto=self.crypto)
+        if not ok:
+            QMessageBox.critical(self, t("title_error"), str(err))
+            return
+        self._backup("restorebackup")
+        try:
+            self.storage._raw_data = self.storage._load()
+            self.storage._sync_data()
+            self._refresh_table()
+        except SystemExit:
+            QMessageBox.critical(
+                self, t("title_error"), t("login_decrypt_err"))
+            return
+        except Exception as e:
+            QMessageBox.critical(
+                self, t("title_error"), t("status_load_failed", e=e))
+            return
+        if self._git_sync:
+            threading.Thread(
+                target=self._git_commit_worker,
+                args=("nimbus: restore backup",),
+                daemon=True,
+            ).start()
+        self._show_status(t("status_backup_restored"))
 
     def _export_archive(self):
         if not self.session.paths:
