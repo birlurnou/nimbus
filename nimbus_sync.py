@@ -177,23 +177,12 @@ class GitSync:
         return bool(r.stdout.strip())
 
     def _commit_all(self, msg):
-        self._run("add", "-A")
-
-        try:
-            for name in os.listdir(self.repo_dir):
-                if name.startswith("."):
-                    continue
-                d = os.path.join(self.repo_dir, name)
-                if not os.path.isdir(d):
-                    continue
-                if name == self.username:
-                    continue
-                self._run(
-                    "rm", "-r", "--cached", "--ignore-unmatch", "-q", name,
-                    check=False, timeout=30,
-                )
-        except Exception:
-            pass
+        user_dir = os.path.join(self.repo_dir, self.username)
+        if os.path.isdir(user_dir):
+            self._run("add", "-A", "--", self.username, check=False)
+        for fname in (".gitignore", "README.md"):
+            if os.path.exists(os.path.join(self.repo_dir, fname)):
+                self._run("add", "--", fname, check=False)
 
         r = self._run("status", "--porcelain", check=False)
         if not r.stdout.strip():
