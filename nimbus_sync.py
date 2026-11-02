@@ -178,6 +178,23 @@ class GitSync:
 
     def _commit_all(self, msg):
         self._run("add", "-A")
+
+        try:
+            for name in os.listdir(self.repo_dir):
+                if name.startswith("."):
+                    continue
+                d = os.path.join(self.repo_dir, name)
+                if not os.path.isdir(d):
+                    continue
+                if name == self.username:
+                    continue
+                self._run(
+                    "rm", "-r", "--cached", "--ignore-unmatch", "-q", name,
+                    check=False, timeout=30,
+                )
+        except Exception:
+            pass
+
         r = self._run("status", "--porcelain", check=False)
         if not r.stdout.strip():
             return False
@@ -215,22 +232,7 @@ class GitSync:
     # --- repo init ---
 
     def _write_gitignore(self):
-        users = set()
-        try:
-            for name in os.listdir(self.repo_dir):
-                if name.startswith("."):
-                    continue
-                d = os.path.join(self.repo_dir, name)
-                if not os.path.isdir(d):
-                    continue
-                try:
-                    if any(f.endswith(".nimbus_key") for f in os.listdir(d)):
-                        users.add(name)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        users.add(self.username)
+        users = {self.username}
 
         lines = [
             "# Nimbus sync",
