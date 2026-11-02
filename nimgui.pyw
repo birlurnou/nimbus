@@ -1427,20 +1427,34 @@ class LoginView(QWidget):
         self._status_key = None
         self._status_text = None
         self._status_color = None
+        self._show_username_input = True
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 16)
         outer.setSpacing(0)
+
         top_bar = QHBoxLayout()
         top_bar.setSpacing(8)
         self.switch = ThemeSwitch(self)
         top_bar.addWidget(self.switch, alignment=Qt.AlignmentFlag.AlignVCenter)
         top_bar.addStretch(1)
+
+        self.last_user_label = QLabel("")
+        self.last_user_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        top_bar.addWidget(self.last_user_label, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        self.change_user_btn = QPushButton(t("btn_change_user"))
+        self.change_user_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.change_user_btn.setMinimumHeight(38)
+        self.change_user_btn.clicked.connect(self._on_change_user)
+        top_bar.addWidget(self.change_user_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         self.add_user_btn = QPushButton("＋")
         self.add_user_btn.setFixedSize(38, 38)
         self.add_user_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_user_btn.clicked.connect(self._on_add_user)
-        top_bar.addWidget(self.add_user_btn)
+        top_bar.addWidget(self.add_user_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
         outer.addLayout(top_bar)
         outer.addStretch(1)
 
@@ -1449,11 +1463,23 @@ class LoginView(QWidget):
         layout = QVBoxLayout(container)
         layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
+
         self.title = QLabel("Nimbus")
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title)
         layout.addSpacing(20)
 
+        # --- username (только в manual mode) ---
+        self.username_edit = QLineEdit()
+        self.username_edit.setPlaceholderText(t("ph_username"))
+        self.username_edit.setMinimumHeight(44)
+        self.username_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.username_edit.returnPressed.connect(
+            lambda: self.pw_edit.setFocus())
+        layout.addWidget(self.username_edit)
+        layout.addSpacing(8)
+
+        # --- password ---
         self.pw_edit = PasswordEdit()
         self.pw_edit.submitted.connect(self._on_submit)
         layout.addWidget(self.pw_edit)
@@ -1472,9 +1498,71 @@ class LoginView(QWidget):
 
         outer.addWidget(container, alignment=Qt.AlignmentFlag.AlignCenter)
         outer.addStretch(1)
+
         theme.subscribe(lambda _: self._restyle())
         i18n.subscribe(lambda: self._on_lang_change())
         self._restyle()
+        self._apply_mode()
+        QTimer.singleShot(0, self._initial_focus)
+
+    # --- режимы ---
+
+    @staticmethod
+    def _mask_username(name: str) -> str:
+        n = len(name)
+        stars = n // 2
+        return "*" * stars + name[stars:]
+
+    def _get_last_user(self):
+        name = load_last_user()
+        if not name:
+            return None
+        try:
+            if not nimbus.UserPaths(name).exists():
+                return None
+        except Exception:
+            return None
+        return name
+
+    def _apply_mode(self):
+        last = self._get_last_user()
+        self._show_username_input = last is None
+        if last:
+            self.last_user_label.setText(self._mask_username(last))
+            self.last_user_label.setVisible(True)
+            self.change_user_btn.setVisible(True)
+            self.username_edit.setVisible(False)
+        else:
+            self.last_user_label.setVisible(False)
+            self.change_user_btn.setVisible(False)
+            self.username_edit.setVisible(True)
+            self.username_edit.setPlaceholderText(t("ph_username"))
+        self.adjustSize()
+
+    def _initial_focus(self):
+        try:
+            if self._show_username_input:
+                self.username_edit.setFocus()
+            else:
+                self.pw_edit.setFocus()
+        except RuntimeError:
+            pass
+
+    def _on_change_user(self):
+        save_last_user("")
+        self._attempts = 0
+        self._lock_until = 0.0
+        self.pw_edit.clear()
+        self.pw_edit.setEnabled(True)
+        self.username_edit.clear()
+        self._apply_mode()
+        self._apply_status("", theme.current()["text_muted"])
+        try:
+            self.username_edit.setFocus()
+        except RuntimeError:
+            pass
+
+    # --- status ---
 
     def _clear_status(self):
         try:
@@ -1488,6 +1576,7 @@ class LoginView(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             try:
                 self.pw_edit.clearFocus()
+                self.username_edit.clearFocus()
             except RuntimeError:
                 pass
         super().mousePressEvent(event)
@@ -1510,10 +1599,13 @@ class LoginView(QWidget):
         self._status_key = None
         self._status_text = None
         self._apply_status("", theme.current()["text_muted"])
+        self._apply_mode()
+        self._initial_focus()
 
     def _on_lang_change(self):
         try:
             self._restyle()
+            self._apply_mode()
             self._reapply_status()
         except RuntimeError:
             pass
@@ -1526,6 +1618,34 @@ class LoginView(QWidget):
                 f"letter-spacing: -1.5px; background: transparent;")
             self.status.setStyleSheet(
                 f"font-size: 18px; color: {t_['text_muted']}; background: transparent;")
+            self.last_user_label.setStyleSheet(
+                f"font-size: 20px; font-weight: 600; color: {t_['accent']}; "
+                f"background: transparent; letter-spacing: 1px; "
+                f"padding-right: 4px;")
+            self.change_user_btn.setStyleSheet(f"""
+               QPushButton {{
+                   background: transparent; border: 1px solid {t_['btn_border']};
+                   border-radius: 6px; color: {t_['text_sec']};
+                   font-size: 14px; font-weight: 500; padding: 6px 14px;
+               }}
+               QPushButton:hover {{
+                   background: {t_['btn_accent_hover_bg']};
+                   border: 1px solid {t_['accent']}; color: {t_['accent']};
+               }}
+               QPushButton:pressed {{
+                   background: {t_['accent']}; border: 1px solid {t_['accent']};
+                   color: {t_['text_inv']};
+               }}
+           """)
+            self.username_edit.setStyleSheet(f"""
+               QLineEdit {{
+                   background: {t_['input_bg']}; border: 1px solid {t_['input_border']};
+                   border-radius: 6px; padding: 8px 12px; color: {t_['text']};
+                   font-size: 22px; selection-background-color: {t_['accent']};
+                   selection-color: {t_['text_inv']};
+               }}
+               QLineEdit:focus {{ border: 1px solid {t_['input_focus']}; }}
+           """)
             self.add_user_btn.setStyleSheet(f"""
                 QPushButton {{
                     background: transparent; border: 1px solid {t_['btn_border']};
@@ -1596,34 +1716,55 @@ class LoginView(QWidget):
             self.show_text(t("restore_ok", name=username), theme.current()["accent"])
             return
         if dlg.username:
+            save_last_user(dlg.username)
+            self._apply_mode()
             self.show_text(t("reg_ok", name=dlg.username), theme.current()["accent"])
 
     def _on_submit(self, pw):
         if not pw:
             self._set_status_key("login_need_pw", "#cc8844")
             return
+
         now = time.time()
         if now < self._lock_until:
             remain = max(1, int(self._lock_until - now + 0.999))
             self._apply_status(t("login_locked", n=remain), theme.current()["danger"])
             return
-        users = nimbus.list_existing_users()
-        if not users:
+
+        if self._show_username_input:
+            username = self.username_edit.text().strip()
+            if not username:
+                self._set_status_key("login_need_login", "#cc8844")
+                return
+        else:
+            username = self._get_last_user()
+            if not username:
+                self._apply_mode()
+                self._set_status_key("login_need_login", "#cc8844")
+                return
+
+        paths = nimbus.UserPaths(username)
+        if not paths.exists():
+            self._apply_status(
+                t("login_user_not_found", name=username),
+                theme.current()["danger"],
+            )
             self.pw_edit.clear()
-            self._set_status_key("reg_first_required", theme.current()["danger"])
             return
-        matched_paths = None
-        matched_salt = None
-        for u in users:
-            paths = nimbus.UserPaths(u)
-            try:
-                salt = nimbus.load_or_create_salt(paths.salt_file)
-                if nimbus.verify_master_password(pw, salt, paths.key_file):
-                    matched_paths, matched_salt = paths, salt
-                    break
-            except Exception:
-                continue
-        if not matched_paths:
+
+        try:
+            salt = nimbus.load_or_create_salt(paths.salt_file)
+        except Exception as e:
+            self._apply_status(t("login_salt_err", e=e), theme.current()["danger"])
+            self.pw_edit.clear()
+            return
+
+        try:
+            ok = nimbus.verify_master_password(pw, salt, paths.key_file)
+        except Exception:
+            ok = False
+
+        if not ok:
             self._attempts += 1
             self.pw_edit.clear()
             if self._attempts >= 3:
@@ -1634,8 +1775,9 @@ class LoginView(QWidget):
             else:
                 self._set_status_key("login_wrong", theme.current()["danger"])
             return
+
         self._attempts = 0
-        self._finish(pw, matched_paths, matched_salt)
+        self._finish(pw, paths, salt)
 
     def _lock_input(self, seconds):
         self.pw_edit.setEnabled(False)
@@ -1798,13 +1940,11 @@ class RegisterDialog(QDialog):
             else:
                 self.lbl_username.setText(t("field_username"))
                 self.username_edit.setPlaceholderText(t("ph_username"))
-            self.lbl_username.setText(t("field_username"))
             self.lbl_pw.setText(t("field_password"))
             self.lbl_pw_confirm.setText(t("field_password_confirm"))
             self.lbl_github.setText(t("label_github_url"))
             self.lbl_github_token.setText(t("label_github_token"))
             self.token_hint.setText(t("gh_auth_help"))
-            self.username_edit.setPlaceholderText(t("ph_username"))
             self.password_edit.setPlaceholderText(t("ph_password_new"))
             self.confirm_edit.setPlaceholderText(t("ph_password_confirm"))
             self.github_edit.setPlaceholderText(t("ph_github_url"))
@@ -3217,6 +3357,8 @@ class MainWindow(QMainWindow):
                                       theme.current()["accent"])
             return
         if dlg.username:
+            save_last_user(dlg.username)
+            self.login_view._apply_mode()
             self.login_view.show_text(t("reg_ok", name=dlg.username),
                                       theme.current()["accent"])
 
