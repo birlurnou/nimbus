@@ -69,6 +69,7 @@ class UserPaths:
         self.meta_file = os.path.join(self.user_dir, f'{username}.nimbus_meta')
         self.settings_file = os.path.join(self.user_dir, f'{username}.nimbus_settings')
         self.lock_file = os.path.join(self.user_dir, f'{username}.nimbus.lock')
+        self.backup_dir = os.path.join(self.user_dir, 'backup')
 
     def ensure_dir(self):
         os.makedirs(self.user_dir, exist_ok=True)
@@ -147,6 +148,96 @@ class UserPaths:
             except Exception:
                 pass
             return False, f'Archive export failed: {e}'
+
+    # ---------- backup ----------
+
+    def backup_data_file(self, action: str) -> Optional[str]:
+        if not os.path.exists(self.data_file):
+            return None
+        try:
+            os.makedirs(self.backup_dir, exist_ok=True)
+            ts = time.strftime('%y%m%d_%H%M%S')
+            safe = ''.join(c if (c.isalnum() or c == '_') else '_'
+                           for c in str(action))[:32] or 'snap'
+            base = f"{self.username}_{ts}_{safe}"
+            path = os.path.join(self.backup_dir, base + '.nimbus')
+            i = 1
+            while os.path.exists(path):
+                path = os.path.join(self.backup_dir, f"{base}_{i}.nimbus")
+                i += 1
+            shutil.copy2(self.data_file, path)
+            try:
+                os.chmod(path, 0o600)
+            except Exception:
+                pass
+            return path
+        except Exception as e:
+            print(f"[backup] failed: {e}")
+            return None
+
+    def list_backups(self) -> list:
+        result = []
+        if not os.path.isdir(self.backup_dir):
+            return result
+        prefix = f"{self.username}_"
+        try:
+            for f in os.listdir(self.backup_dir):
+                if not f.endswith('.nimbus'):
+                    continue
+                path = os.path.join(self.backup_dir, f)
+                if not os.path.isfile(path):
+                    continue
+                stem = f[:-len('.nimbus')]
+                action = ''
+                ts_label = ''
+                if stem.startswith(prefix):
+                    rest = stem[len(prefix):]
+                    parts = rest.split('_', 2)
+                    if len(parts) >= 2:
+                        ts_label = f"{parts[0]}_{parts[1]}"
+                        action = parts[2] if len(parts) > 2 else ''
+                try:
+                    mtime = os.path.getmtime(path)
+                    size = os.path.getsize(path)
+                except Exception:
+                    mtime, size = 0, 0
+                result.append({
+                    'filename': f,
+                    'path': path,
+                    'action': action,
+                    'ts': ts_label,
+                    'mtime': mtime,
+                    'size': size,
+                })
+        except Exception:
+            pass
+        result.sort(key=lambda x: x['mtime'], reverse=True)
+        return result
+
+    def restore_backup(self, filename: str, crypto=None) -> tuple:
+        src = os.path.join(self.backup_dir, filename)
+        if not os.path.isfile(src):
+            return False, f"Backup not found: {filename}"
+        if crypto is not None:
+            try:
+                with open(src, 'r', encoding='utf-8') as f:
+                    enc = f.read().strip()
+                if enc:
+                    crypto.decrypt(enc)
+            except Exception as e:
+                return False, (
+                    f"backup cannot be decrypted with current master "
+                    f"password: {e}"
+                )
+        try:
+            shutil.copy2(src, self.data_file)
+            try:
+                os.chmod(self.data_file, 0o600)
+            except Exception:
+                pass
+            return True, filename
+        except Exception as e:
+            return False, str(e)
 
 
 def list_existing_users(base_dir: str = '.') -> list:
