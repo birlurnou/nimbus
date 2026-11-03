@@ -958,11 +958,13 @@ class HoverTableView(QTableView):
 
 
 class TileDelegate(QStyledItemDelegate):
-    def __init__(self, view, is_action_column=False, on_action=None):
+    def __init__(self, view, is_action_column=False, on_action=None,
+                 highlight_whole_row=False):
         super().__init__(view)
         self.view = view
         self.is_action_column = is_action_column
         self.on_action = on_action
+        self.highlight_whole_row = highlight_whole_row
 
     def paint(self, painter, option, index):
         painter.save()
@@ -971,7 +973,10 @@ class TileDelegate(QStyledItemDelegate):
         row = index.row()
         col = index.column()
         row_hovered = (row == self.view.hover_row)
-        tile_hovered = row_hovered and (col == self.view.hover_col)
+        if self.highlight_whole_row:
+            tile_hovered = row_hovered
+        else:
+            tile_hovered = row_hovered and (col == self.view.hover_col)
         is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
         if is_selected:
             painter.setPen(Qt.PenStyle.NoPen)
@@ -2130,7 +2135,7 @@ class RestoreBackupDialog(QDialog):
         self.table.setWordWrap(False)
         self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table.setStyleSheet("background: transparent;")
-        td = TileDelegate(self.table)
+        td = TileDelegate(self.table, highlight_whole_row=True)
         for c in (0, 1, 2):
             self.table.setItemDelegateForColumn(c, td)
         self.table.selectionModel().selectionChanged.connect(
