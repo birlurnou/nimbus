@@ -12,7 +12,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QFont, QMouseEvent, QIcon, QPixmap,
-    QAction, QIntValidator
+    QAction, QIntValidator, QStandardItemModel, QStandardItem
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -289,7 +289,8 @@ STRINGS = {
 
     "btn_restore_backup": {"ru": "Восстановить из бекапа", "en": "Restore from backup"},
     "title_restore_backup": {"ru": "Восстановить из бекапа", "en": "Restore from backup"},
-    "backup_col_time": {"ru": "ДАТА / ВРЕМЯ", "en": "DATE / TIME"},
+     "backup_col_date": {"ru": "ДАТА", "en": "DATE"},
+    "backup_col_time": {"ru": "ВРЕМЯ", "en": "TIME"},
     "backup_col_action": {"ru": "ДЕЙСТВИЕ", "en": "ACTION"},
     "backup_empty": {"ru": "Бекапов пока нет", "en": "No backups yet"},
     "backup_action_initial": {"ru": "создание пользователя", "en": "user created"},
@@ -301,10 +302,16 @@ STRINGS = {
     "backup_action_chpw": {"ru": "смена мастер-пароля", "en": "master pw change"},
     "backup_action_change": {"ru": "изменение", "en": "change"},
     "backup_action_restore": {"ru": "восстановление из бекапа", "en": "restore from backup"},
-    "backup_confirm_title": {"ru": "Восстановить из бекапа?",
-                             "en": "Restore from backup?"},
-    "backup_confirm_msg": {"ru": "Текущие данные будут заменены выбранным бекапом.\n\n{filename}\n\nПродолжить?",
-                           "en": "Current data will be replaced by the selected backup.\n\n{filename}\n\nContinue?"},
+        "backup_confirm_title": {"ru": "Подтверждение восстановления",
+                             "en": "Restore confirmation"},
+    "backup_confirm_msg": {"ru": "Восстановить данные из выбранного бекапа?\n\n"
+                                 "Файл: {filename}\n\n"
+                                 "Все текущие записи будут заменены содержимым "
+                                 "бекапа. Это действие нельзя отменить.",
+                           "en": "Restore data from the selected backup?\n\n"
+                                 "File: {filename}\n\n"
+                                 "All current records will be replaced with the "
+                                 "backup content. This action cannot be undone."},
     "status_backup_restored": {"ru": "Данные восстановлены из бекапа",
                                "en": "Restored from backup"},
 
@@ -1482,7 +1489,7 @@ class LoginView(QWidget):
         outer.addStretch(1)
 
         container = QWidget()
-        container.setFixedWidth(440)
+        container.setFixedWidth(400)
         layout = QVBoxLayout(container)
         layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1559,7 +1566,7 @@ class LoginView(QWidget):
             self.last_user_label.setVisible(False)
             self.change_user_btn.setVisible(False)
             self.username_edit.setVisible(True)
-            self.username_edit.setPlaceholderText(t("ph_username"))
+            self.username_edit.setPlaceholderText(t("ph_username_login_placeholder"))
         self.adjustSize()
 
     def _initial_focus(self):
