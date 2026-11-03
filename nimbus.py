@@ -167,6 +167,10 @@ class UserPaths:
                 i += 1
             shutil.copy2(self.data_file, path)
             try:
+                os.utime(path, None)
+            except Exception:
+                pass
+            try:
                 os.chmod(path, 0o600)
             except Exception:
                 pass
@@ -231,6 +235,10 @@ class UserPaths:
                 )
         try:
             shutil.copy2(src, self.data_file)
+            try:
+                os.utime(self.data_file, None)
+            except Exception:
+                pass
             try:
                 os.chmod(self.data_file, 0o600)
             except Exception:

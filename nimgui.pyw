@@ -176,6 +176,7 @@ STRINGS = {
     "field_username": {"ru": "Логин", "en": "Login"},
     "field_password_confirm": {"ru": "Повторите пароль", "en": "Repeat password"},
     "ph_username": {"ru": "например, alice", "en": "e.g. alice"},
+    "ph_username_login_placeholder": {"ru": " ", "en": " "},
     "ph_password_new": {"ru": "минимум 10 символов", "en": "at least 10 characters"},
     "ph_password_confirm": {"ru": "повторите пароль", "en": "repeat password"},
     "reg_err_empty": {"ru": "Введите логин", "en": "Enter login"},
@@ -3991,7 +3992,7 @@ class MainWindow(QMainWindow):
         al.setContentsMargins(0, 0, 0, 0)
         al.setSpacing(8)
         self._add_btn = QPushButton(t("btn_create"))
-        self._add_btn.setMinimumHeight(38)
+        self._add_btn.setMaximumHeight(38)
         self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._add_btn.setStyleSheet(primary_btn_qss(t_))
         self._add_btn.clicked.connect(self._add_record)
