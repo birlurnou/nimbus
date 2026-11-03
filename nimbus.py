@@ -151,7 +151,7 @@ class UserPaths:
 
     # ---------- backup ----------
 
-    def backup_data_file(self, action: str) -> Optional[str]:
+    def backup_data_file(self, action: str, keep: int = 50) -> Optional[str]:
         if not os.path.exists(self.data_file):
             return None
         try:
@@ -174,6 +174,22 @@ class UserPaths:
                 os.chmod(path, 0o600)
             except Exception:
                 pass
+
+            try:
+                snaps = [
+                    os.path.join(self.backup_dir, f)
+                    for f in os.listdir(self.backup_dir)
+                    if f.endswith('.nimbus') and f.startswith(f"{self.username}_")
+                ]
+                snaps.sort(key=lambda p: os.path.getmtime(p))
+                for old in snaps[:-keep]:
+                    try:
+                        os.remove(old)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[backup] retention failed: {e}")
+
             return path
         except Exception as e:
             print(f"[backup] failed: {e}")

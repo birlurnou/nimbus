@@ -242,8 +242,8 @@ class GitSync:
                         "!/README.md",
                     ] + lines
 
-        for pat in ("*.lock", "*.nimbus_settings", ".nimbus_sync_state.json",
-                    "**/backup/"):
+        for pat in ("*.lock", "*.nimbus_settings", ".nimbus_sync_state.json", #"**/backup/"
+                ):
             if pat not in lines:
                 lines.append(pat)
 
