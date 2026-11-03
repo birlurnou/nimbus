@@ -2090,7 +2090,7 @@ class RestoreBackupDialog(QDialog):
         self._backups = paths.list_backups()
 
         self.setWindowTitle(t("title_restore_backup"))
-        self.setMinimumSize(620, 480)
+        self.setMinimumSize(680, 500)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -2101,16 +2101,25 @@ class RestoreBackupDialog(QDialog):
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title_label)
 
-        self.table = QTableWidget(0, 2, self)
-        self.table.setHorizontalHeaderLabels([
+        self.model = QStandardItemModel(0, 3, self)
+        self.model.setHorizontalHeaderLabels([
+            t("backup_col_date"),
             t("backup_col_time"),
             t("backup_col_action"),
         ])
-        self.table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch)
+
+        self.table = HoverTableView()
+        self.table.setModel(self.model)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.resizeSection(0, 130)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        header.resizeSection(1, 100)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setHighlightSections(False)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(60)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(
@@ -2118,7 +2127,13 @@ class RestoreBackupDialog(QDialog):
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setShowGrid(False)
-        self.table.itemSelectionChanged.connect(
+        self.table.setWordWrap(False)
+        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table.setStyleSheet("background: transparent;")
+        td = TileDelegate(self.table)
+        for c in (0, 1, 2):
+            self.table.setItemDelegateForColumn(c, td)
+        self.table.selectionModel().selectionChanged.connect(
             self._on_selection_changed)
         layout.addWidget(self.table, 1)
 
@@ -2150,6 +2165,15 @@ class RestoreBackupDialog(QDialog):
         i18n.subscribe(self._retranslate)
         self._restyle()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            try:
+                if hasattr(self, "table"):
+                    self.table.clearSelection()
+            except RuntimeError:
+                pass
+        super().mousePressEvent(event)
+
     @staticmethod
     def _action_label(action):
         m = {
@@ -2165,18 +2189,26 @@ class RestoreBackupDialog(QDialog):
         return t(m.get(action, "backup_action_change"))
 
     def _fill_table(self):
-        self.table.setRowCount(len(self._backups))
-        for i, b in enumerate(self._backups):
-            ts_str = time.strftime(
-                "%Y-%m-%d %H:%M:%S", time.localtime(b["mtime"]))
-            item_t = QTableWidgetItem(ts_str)
-            item_t.setData(Qt.ItemDataRole.UserRole, b["filename"])
-            item_t.setData(Qt.ItemDataRole.UserRole + 1, b["action"])
-            item_a = QTableWidgetItem(self._action_label(b["action"]))
-            self.table.setItem(i, 0, item_t)
-            self.table.setItem(i, 1, item_a)
+        self.model.setRowCount(0)
+        for b in self._backups:
+            try:
+                dt = time.localtime(b["mtime"])
+                date_str = time.strftime("%Y-%m-%d", dt)
+                time_str = time.strftime("%H:%M:%S", dt)
+            except Exception:
+                date_str, time_str = "—", "—"
+            it_date = QStandardItem(date_str)
+            it_date.setData(b["filename"], Qt.ItemDataRole.UserRole)
+            it_date.setData(b["action"], Qt.ItemDataRole.UserRole + 1)
+            it_time = QStandardItem(time_str)
+            it_action = QStandardItem(self._action_label(b["action"]))
+            self.model.appendRow([it_date, it_time, it_action])
+        try:
+            self.empty_label.setVisible(len(self._backups) == 0)
+        except RuntimeError:
+            pass
 
-    def _on_selection_changed(self):
+    def _on_selection_changed(self, *_):
         try:
             rows = self.table.selectionModel().selectedRows()
             self.restore_btn.setEnabled(bool(rows))
@@ -2189,7 +2221,7 @@ class RestoreBackupDialog(QDialog):
             if not rows:
                 return
             row = rows[0].row()
-            item = self.table.item(row, 0)
+            item = self.model.item(row, 0)
             if not item:
                 return
             filename = item.data(Qt.ItemDataRole.UserRole)
@@ -2213,7 +2245,8 @@ class RestoreBackupDialog(QDialog):
         try:
             self.setWindowTitle(t("title_restore_backup"))
             self.title_label.setText(t("title_restore_backup"))
-            self.table.setHorizontalHeaderLabels([
+            self.model.setHorizontalHeaderLabels([
+                t("backup_col_date"),
                 t("backup_col_time"),
                 t("backup_col_action"),
             ])
